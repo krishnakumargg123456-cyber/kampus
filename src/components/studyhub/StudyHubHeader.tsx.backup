@@ -1,0 +1,608 @@
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  BookOpen,
+  Search,
+  Bell,
+  X,
+  Clock,
+  ArrowUpRight,
+  FileText,
+  Layers,
+  StickyNote,
+  ScrollText,
+  HelpCircle,
+  Sparkles,
+  LayoutDashboard,
+  Library,
+  PenTool,
+  ClipboardCheck,
+  BarChart3,
+  Bookmark,
+  AlarmClock,
+} from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import { useLanguage } from '../../context/LanguageContext';
+import { useNotifications } from '../../context/NotificationContext';
+import { useStudyHub } from '../../context/StudyHubContext';
+import { StudyHubTab } from '../../types/studyHub';
+
+interface StudyHubHeaderProps {
+  onOpenNotifications?: () => void;
+}
+
+type SearchScope = 'all' | 'subjects' | 'chapters' | 'notes' | 'materials' | 'papers' | 'questions';
+
+export const StudyHubHeader: React.FC<StudyHubHeaderProps> = ({ onOpenNotifications }) => {
+  const { profile } = useAuth();
+  const { language, toggleLanguage } = useLanguage();
+  const { unreadCount } = useNotifications();
+  const {
+    state,
+    activeTab,
+    setActiveTab,
+    openSubjectChapterTopic,
+    addRecentSearch,
+    clearRecentSearches,
+  } = useStudyHub();
+
+  const [query, setQuery] = useState('');
+  const [searchScope, setSearchScope] = useState<SearchScope>('all');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+        setIsSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, []);
+
+  const hour = new Date().getHours();
+  const greetingEn = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const greetingHi = hour < 12 ? 'सुप्रभात' : hour < 17 ? 'नमस्कार' : 'शुभ संध्या';
+  const firstName = profile.name.split(' ')[0] || 'Scholar';
+
+  const qLower = query.trim().toLowerCase();
+
+  // Compute live unified search matches
+  const matchedSubjects =
+    qLower && (searchScope === 'all' || searchScope === 'subjects')
+      ? state.subjects.filter(
+          (s) =>
+            s.name.toLowerCase().includes(qLower) ||
+            s.code.toLowerCase().includes(qLower) ||
+            s.course.toLowerCase().includes(qLower)
+        )
+      : [];
+
+  const matchedChaptersAndTopics: Array<{
+    type: 'chapter' | 'topic';
+    subjectId: string;
+    chapterId: string;
+    topicId?: string;
+    title: string;
+    subtitle: string;
+  }> = [];
+
+  if (qLower && (searchScope === 'all' || searchScope === 'chapters')) {
+    state.subjects.forEach((subj) => {
+      subj.chapters.forEach((ch) => {
+        if (ch.title.toLowerCase().includes(qLower) || ch.overview.toLowerCase().includes(qLower)) {
+          matchedChaptersAndTopics.push({
+            type: 'chapter',
+            subjectId: subj.id,
+            chapterId: ch.id,
+            title: `Ch ${ch.number}: ${ch.title}`,
+            subtitle: `${subj.code} · ${subj.name}`,
+          });
+        }
+        ch.topics.forEach((tp) => {
+          if (tp.title.toLowerCase().includes(qLower) || tp.summary.toLowerCase().includes(qLower)) {
+            matchedChaptersAndTopics.push({
+              type: 'topic',
+              subjectId: subj.id,
+              chapterId: ch.id,
+              topicId: tp.id,
+              title: tp.title,
+              subtitle: `${subj.code} · Ch ${ch.number}: ${ch.title}`,
+            });
+          }
+        });
+      });
+    });
+  }
+
+  const matchedMaterials =
+    qLower && (searchScope === 'all' || searchScope === 'materials')
+      ? state.materials.filter(
+          (m) =>
+            m.title.toLowerCase().includes(qLower) ||
+            m.subjectName.toLowerCase().includes(qLower) ||
+            m.category.toLowerCase().includes(qLower)
+        )
+      : [];
+
+  const matchedNotes =
+    qLower && (searchScope === 'all' || searchScope === 'notes')
+      ? state.notes.filter(
+          (n) =>
+            n.title.toLowerCase().includes(qLower) ||
+            n.content.toLowerCase().includes(qLower) ||
+            n.description.toLowerCase().includes(qLower)
+        )
+      : [];
+
+  const matchedPapers =
+    qLower && (searchScope === 'all' || searchScope === 'papers')
+      ? state.papers.filter(
+          (p) =>
+            p.title.toLowerCase().includes(qLower) ||
+            p.subjectName.toLowerCase().includes(qLower) ||
+            String(p.year).includes(qLower)
+        )
+      : [];
+
+  const matchedQuestions =
+    qLower && (searchScope === 'all' || searchScope === 'questions')
+      ? state.questions.filter(
+          (q) =>
+            q.question.toLowerCase().includes(qLower) ||
+            q.chapterName.toLowerCase().includes(qLower)
+        )
+      : [];
+
+  const totalMatches =
+    matchedSubjects.length +
+    matchedChaptersAndTopics.length +
+    matchedMaterials.length +
+    matchedNotes.length +
+    matchedPapers.length +
+    matchedQuestions.length;
+
+  const suggestedQueries = ['Dynamic Programming', 'Normalization', 'Gauss Law', 'EMAT', '2025'];
+
+  const handleSelectSearchAction = (action: () => void) => {
+    if (query.trim()) addRecentSearch(query.trim());
+    setIsSearchOpen(false);
+    action();
+  };
+
+  const tabs: Array<{ id: StudyHubTab; labelEn: string; labelHi: string; icon: React.ReactNode }> = [
+    { id: 'dashboard', labelEn: 'Dashboard', labelHi: 'डैशबोर्ड', icon: <LayoutDashboard className="w-3.5 h-3.5" /> },
+    { id: 'subjects', labelEn: 'Subjects & Chapters', labelHi: 'विषय व अध्याय', icon: <Layers className="w-3.5 h-3.5" /> },
+    { id: 'library', labelEn: 'Library', labelHi: 'लाइब्रेरी', icon: <Library className="w-3.5 h-3.5" /> },
+    { id: 'notes', labelEn: 'Notes', labelHi: 'नोट्स', icon: <PenTool className="w-3.5 h-3.5" /> },
+    { id: 'pyqs', labelEn: 'PYQ Papers', labelHi: 'पिछले पेपर', icon: <ScrollText className="w-3.5 h-3.5" /> },
+    { id: 'qbank', labelEn: 'Question Bank', labelHi: 'प्रश्न बैंक', icon: <HelpCircle className="w-3.5 h-3.5" /> },
+    { id: 'tests', labelEn: 'Practice Tests', labelHi: 'प्रैक्टिस टेस्ट', icon: <ClipboardCheck className="w-3.5 h-3.5" /> },
+    { id: 'analytics', labelEn: 'Analytics', labelHi: 'प्रगति विश्लेषण', icon: <BarChart3 className="w-3.5 h-3.5" /> },
+    { id: 'saved', labelEn: 'Saved & Uploads', labelHi: 'सेव्ड व अपलोड्स', icon: <Bookmark className="w-3.5 h-3.5" /> },
+    { id: 'reminders', labelEn: 'Reminders', labelHi: 'रिमाइंडर्स', icon: <AlarmClock className="w-3.5 h-3.5" /> },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* Top Workspace Header Card */}
+      <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-4 sm:p-6 shadow-2xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          {/* Brand Title & Greeting */}
+          <div>
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+              <BookOpen className="w-4 h-4" />
+              <span>LEARN · Module 01</span>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mt-1">
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+                {language === 'hi' ? 'स्टडी हब (Study Hub)' : 'Study Hub'}
+              </h1>
+              <span className="text-xs sm:text-sm font-medium text-slate-500 dark:text-slate-400">
+                {language === 'hi' ? `${greetingHi}, ${firstName}` : `${greetingEn}, ${firstName}`}
+                <span className="mx-1.5 text-slate-300 dark:text-slate-600">·</span>
+                <span className="text-orange-600 dark:text-orange-400 font-semibold">{profile.course}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Utility Actions: Language, Notifications, Student Profile */}
+          <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
+            <button
+              onClick={toggleLanguage}
+              className="px-3 py-2 rounded-xl text-xs font-bold bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span className={language === 'en' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}>EN</span>
+              <span className="mx-1 text-slate-300 dark:text-slate-600">|</span>
+              <span className={language === 'hi' ? 'text-blue-600 dark:text-blue-400 font-hindi' : 'text-slate-400 font-hindi'}>
+                हिन्दी
+              </span>
+            </button>
+
+            <button
+              onClick={onOpenNotifications}
+              className="relative p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors shrink-0 cursor-pointer"
+              aria-label="Study Notifications"
+              title="Notifications"
+            >
+              <Bell className="w-4 h-4" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+
+            <Link
+              to="/account/profile"
+              className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-xl bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 transition-colors shrink-0"
+            >
+              <img
+                src={profile.avatarUrl}
+                alt={profile.name}
+                referrerPolicy="no-referrer"
+                className="w-7 h-7 rounded-lg object-cover"
+              />
+              <div className="text-left hidden sm:block">
+                <div className="text-xs font-bold text-slate-900 dark:text-slate-100 leading-tight whitespace-nowrap">
+                  {firstName}
+                </div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 leading-tight whitespace-nowrap">
+                  {profile.semester}
+                </div>
+              </div>
+            </Link>
+          </div>
+        </div>
+
+        {/* Global Study Unified Search */}
+        <div className="mt-4 relative" ref={searchBoxRef}>
+          <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 focus-within:border-blue-600 focus-within:bg-white dark:focus-within:bg-slate-900 transition-colors">
+            <Search className="w-4 h-4 text-slate-400 shrink-0" />
+            <input
+              type="text"
+              value={query}
+              onFocus={() => setIsSearchOpen(true)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setIsSearchOpen(true);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && query.trim()) {
+                  addRecentSearch(query.trim());
+                }
+              }}
+              placeholder={
+                language === 'hi'
+                  ? 'विषय, अध्याय, नोट्स, PDF, PYQ या प्रश्न खोजें...'
+                  : 'Search subjects, chapters, topics, notes, PDFs, previous papers, or questions...'
+              }
+              className="w-full bg-transparent text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-hidden"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery('')}
+                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                aria-label="Clear search"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+
+          {/* Unified Search Dropdown */}
+          {isSearchOpen && (
+            <div className="absolute left-0 right-0 mt-2 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl z-40 overflow-hidden">
+              {/* Scope Filters */}
+              <div className="p-2.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                {(
+                  [
+                    { id: 'all', label: 'All' },
+                    { id: 'subjects', label: 'Subjects' },
+                    { id: 'chapters', label: 'Chapters & Topics' },
+                    { id: 'notes', label: 'Notes' },
+                    { id: 'materials', label: 'PDFs & Library' },
+                    { id: 'papers', label: 'PYQ Papers' },
+                    { id: 'questions', label: 'Questions' },
+                  ] as const
+                ).map((sc) => (
+                  <button
+                    key={sc.id}
+                    onClick={() => setSearchScope(sc.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                      searchScope === sc.id
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:border-blue-400'
+                    }`}
+                  >
+                    {sc.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="max-h-96 overflow-y-auto p-3 space-y-4">
+                {!qLower ? (
+                  <div className="space-y-4">
+                    {state.recentSearches.length > 0 && (
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                            Recent Searches
+                          </span>
+                          <button
+                            onClick={clearRecentSearches}
+                            className="text-[11px] text-slate-400 hover:text-rose-500 cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {state.recentSearches.map((item) => (
+                            <button
+                              key={item}
+                              onClick={() => setQuery(item)}
+                              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-blue-950/50 hover:text-blue-600 cursor-pointer"
+                            >
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              <span>{item}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+                        Quick Suggestions
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {suggestedQueries.map((sug) => (
+                          <button
+                            key={sug}
+                            onClick={() => setQuery(sug)}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:border-blue-500 hover:text-blue-600 cursor-pointer"
+                          >
+                            <Sparkles className="w-3 h-3 text-orange-500" />
+                            <span>{sug}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : totalMatches === 0 ? (
+                  <div className="py-8 text-center">
+                    <Search className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                      No study results for "{query}"
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Try searching for a course code (CS-302, CS-304), topic ("Tree DP"), or switch filter to "All".
+                    </p>
+                    <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+                      {suggestedQueries.slice(0, 3).map((sug) => (
+                        <button
+                          key={sug}
+                          onClick={() => {
+                            setSearchScope('all');
+                            setQuery(sug);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 cursor-pointer"
+                        >
+                          Try "{sug}"
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {matchedSubjects.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Subjects ({matchedSubjects.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedSubjects.slice(0, 4).map((s) => (
+                            <button
+                              key={s.id}
+                              onClick={() => handleSelectSearchAction(() => openSubjectChapterTopic(s.id))}
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <Layers className="w-4 h-4 text-blue-600 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                                    {s.code} · {s.name}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {s.level} · {s.semesterOrClass}
+                                  </div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {matchedChaptersAndTopics.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Chapters & Topics ({matchedChaptersAndTopics.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedChaptersAndTopics.slice(0, 5).map((item, idx) => (
+                            <button
+                              key={`${item.chapterId}-${item.topicId || idx}`}
+                              onClick={() =>
+                                handleSelectSearchAction(() =>
+                                  openSubjectChapterTopic(item.subjectId, item.chapterId, item.topicId)
+                                )
+                              }
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <BookOpen className="w-4 h-4 text-orange-500 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {item.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">{item.subtitle}</div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {matchedMaterials.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Study Library Materials ({matchedMaterials.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedMaterials.slice(0, 4).map((m) => (
+                            <button
+                              key={m.id}
+                              onClick={() => handleSelectSearchAction(() => setActiveTab('library'))}
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <FileText className="w-4 h-4 text-emerald-600 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {m.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {m.category} · {m.fileType} · {m.fileSize}
+                                  </div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {matchedNotes.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Personal Notes ({matchedNotes.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedNotes.slice(0, 3).map((n) => (
+                            <button
+                              key={n.id}
+                              onClick={() => handleSelectSearchAction(() => setActiveTab('notes'))}
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <StickyNote className="w-4 h-4 text-blue-600 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {n.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">{n.description}</div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {matchedPapers.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Previous Year Papers ({matchedPapers.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedPapers.slice(0, 3).map((p) => (
+                            <button
+                              key={p.id}
+                              onClick={() => handleSelectSearchAction(() => setActiveTab('pyqs'))}
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <ScrollText className="w-4 h-4 text-orange-500 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {p.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {p.year} · {p.examType} · {p.totalMarks} Marks
+                                  </div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {matchedQuestions.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Question Bank ({matchedQuestions.length})
+                        </div>
+                        <div className="space-y-1">
+                          {matchedQuestions.slice(0, 3).map((q) => (
+                            <button
+                              key={q.id}
+                              onClick={() => handleSelectSearchAction(() => setActiveTab('qbank'))}
+                              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <HelpCircle className="w-4 h-4 text-indigo-500 shrink-0" />
+                                <div className="truncate">
+                                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {q.question}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {q.type} · {q.difficulty} · {q.chapterName}
+                                  </div>
+                                </div>
+                              </div>
+                              <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Horizontal Sub-Navigation Tabs */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 transition-all cursor-pointer border ${
+                isActive
+                  ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                  : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200/80 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-700 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              {tab.icon}
+              <span>{language === 'hi' ? tab.labelHi : tab.labelEn}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};

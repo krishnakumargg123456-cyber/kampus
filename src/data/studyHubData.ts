@@ -1,0 +1,951 @@
+import deskHeroImg from '../assets/images/studyhub_desk_hero_1794549223041.jpg';
+import csAlgoImg from '../assets/images/studyhub_cs_algorithms_1794549223031.jpg';
+import stemImg from '../assets/images/studyhub_science_stem_1794549223458.jpg';
+import examPrepImg from '../assets/images/studyhub_exam_prep_1794549223106.jpg';
+import {
+  StudyHubState,
+  StudySubject,
+  StudyMaterialItem,
+  PersonalNote,
+  QuestionPaper,
+  QuestionBankItem,
+  StudyReminder,
+  DailyStudyLog,
+} from '../types/studyHub';
+
+export const STUDY_HUB_IMAGES = {
+  deskHero: deskHeroImg,
+  csAlgo: csAlgoImg,
+  stem: stemImg,
+  examPrep: examPrepImg,
+};
+
+export const INITIAL_SUBJECTS: StudySubject[] = [
+  {
+    id: 'subj-cs302',
+    code: 'CS-302',
+    name: 'Design & Analysis of Algorithms',
+    level: 'Undergraduate',
+    course: 'B.Tech Computer Science & AI',
+    semesterOrClass: 'Semester 6',
+    description:
+      'Divide-and-conquer, dynamic programming on trees and DAGs, greedy correctness proofs, network flows, and NP-completeness.',
+    imageUrl: csAlgoImg,
+    accentColor: 'blue',
+    lastAccessedAt: '2026-03-22T09:15:00Z',
+    chapters: [
+      {
+        id: 'ch-cs302-1',
+        number: 1,
+        title: 'Asymptotics, Recurrences & Divide and Conquer',
+        overview:
+          'Master asymptotic bounds, Master Theorem edge cases, Akra-Bazzi intuition, and Strassen / Karatsuba divide-and-conquer optimizations.',
+        learningObjectives: [
+          'Prove tight Θ bounds for recursive and iterative algorithms',
+          'Solve non-standard recurrences using recursion trees and Master Theorem',
+          'Analyze cache-friendly divide-and-conquer formulations',
+        ],
+        relatedMaterialIds: ['mat-1', 'mat-6'],
+        completed: true,
+        bookmarked: false,
+        lastTopicId: 'tp-cs302-1-2',
+        personalChapterNotes:
+          'Remember Master Theorem Case 2 logarithmic factor: f(n) = Θ(n^(log_b a) * log^k n) => T(n) = Θ(n^(log_b a) * log^(k+1) n).',
+        topics: [
+          {
+            id: 'tp-cs302-1-1',
+            title: 'Master Theorem & Recursion Tree Analysis',
+            summary: 'Solving T(n) = aT(n/b) + f(n) across all three asymptotic regimes.',
+            keyConcepts: ['Polynomially smaller/larger', 'Regularity condition', 'Balanced tree depth log_b(n)'],
+            studyNotes:
+              'When comparing f(n) against n^(log_b a), polynomial difference ε > 0 is mandatory for Case 1 and Case 3. If f(n) falls in the polynomial gap (e.g., n log n vs n), apply the extended Case 2 or recursion tree summation directly.',
+            estimatedMinutes: 30,
+            completed: true,
+            bookmarked: false,
+          },
+          {
+            id: 'tp-cs302-1-2',
+            title: 'Order Statistics in Worst-Case Linear Time',
+            summary: 'Blum-Floyd-Pratt-Rivest-Tarjan (Median of Medians) algorithm in O(n).',
+            keyConcepts: ['Groups of 5', '3n/10 elimination guarantee', 'T(n) <= T(n/5) + T(7n/10) + O(n)'],
+            studyNotes:
+              'Dividing elements into groups of 5 yields a pivot greater than at least 30% and less than at least 30% of elements. Since 1/5 + 7/10 = 9/10 < 1, the recursion tree forms a decaying geometric series bounded by 10cn.',
+            estimatedMinutes: 35,
+            completed: true,
+            bookmarked: true,
+          },
+        ],
+      },
+      {
+        id: 'ch-cs302-2',
+        number: 2,
+        title: 'Dynamic Programming on Trees & DAGs',
+        overview:
+          'Bottom-up post-order DP states on rooted trees, rerooting technique, longest paths in DAGs, and bitmask subset transitions.',
+        learningObjectives: [
+          'Formulate independent set and vertex cover DP states on trees',
+          'Apply rerooting DP to compute all-roots subtree metrics in O(V)',
+          'Detect topological invariants for DAG shortest/longest paths',
+        ],
+        relatedMaterialIds: ['mat-1', 'mat-5'],
+        completed: false,
+        bookmarked: true,
+        lastTopicId: 'tp-cs302-2-2',
+        personalChapterNotes:
+          'Always initialize leaf base cases before merging child DP vectors in DFS post-order.',
+        topics: [
+          {
+            id: 'tp-cs302-2-1',
+            title: 'Tree DP Fundamentals & Post-Order Traversal',
+            summary: 'Defining dp[u][0/1] states for inclusion-exclusion problems on trees.',
+            keyConcepts: ['Rooting unrooted trees', 'Parent tracking to avoid cycles', 'O(V) linear traversal'],
+            studyNotes:
+              'Root the tree arbitrarily at vertex 1. Run DFS(u, parent): accumulate child contributions first, then finalize dp[u][0] = sum(max(dp[v][0], dp[v][1])) and dp[u][1] = weight[u] + sum(dp[v][0]).',
+            estimatedMinutes: 40,
+            completed: true,
+            bookmarked: true,
+          },
+          {
+            id: 'tp-cs302-2-2',
+            title: 'Rerooting Technique (All-Nodes Subtree Distances)',
+            summary: 'Shifting the root across edges in O(1) per edge using prefix/suffix or complement totals.',
+            keyConcepts: ['Subtree size cnt[u]', 'Out-of-subtree contribution', 'Two-pass DFS'],
+            studyNotes:
+              'Pass 1 computes down[u] and subtree size sz[u]. Pass 2 pushes parent contribution to child v: ans[v] = ans[u] - sz[v] + (N - sz[v]), reducing O(N^2) brute-force to O(N).',
+            estimatedMinutes: 45,
+            completed: false,
+            bookmarked: true,
+          },
+          {
+            id: 'tp-cs302-2-3',
+            title: 'Shortest & Longest Paths in Weighted DAGs',
+            summary: 'Topological sort relaxation invariant without negative cycle issues.',
+            keyConcepts: ['Kahn’s topological order', 'Single-pass edge relaxation', 'Critical path method'],
+            studyNotes:
+              'Because DAGs have no directed cycles, relaxing outgoing edges in topological order guarantees each vertex u has its final shortest (or longest) distance before u is processed. Complexity: O(V + E).',
+            estimatedMinutes: 30,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+      {
+        id: 'ch-cs302-3',
+        number: 3,
+        title: 'Network Flows & Bipartite Matching',
+        overview:
+          'Max-Flow Min-Cut theorem, Ford-Fulkerson residual graphs, Edmonds-Karp O(VE^2), and Konig’s theorem for bipartite graphs.',
+        learningObjectives: [
+          'Construct residual networks and identify augmenting paths',
+          'Prove Max-Flow = Min-Cut via s-t cut reachability',
+          'Model scheduling and assignment problems as maximum flow',
+        ],
+        relatedMaterialIds: ['mat-6'],
+        completed: false,
+        bookmarked: false,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-cs302-3-1',
+            title: 'Residual Graphs & Max-Flow Min-Cut Theorem',
+            summary: 'Forward/backward residual capacities and cut optimality proof.',
+            keyConcepts: ['Augmenting path', 'Weak duality flow <= cut', 'Backward flow cancellation'],
+            studyNotes:
+              'If no augmenting path exists from s to t in G_f, let S be vertices reachable from s in G_f and T = V \\ S. Every edge crossing S->T is saturated and every backward edge T->S carries zero flow, proving f = c(S, T).',
+            estimatedMinutes: 35,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'subj-cs304',
+    code: 'CS-304',
+    name: 'Database Management Systems',
+    level: 'Undergraduate',
+    course: 'B.Tech Computer Science & AI',
+    semesterOrClass: 'Semester 6',
+    description:
+      'Relational algebra, functional dependencies, BCNF/3NF normalization, B+ Tree indexing, ACID concurrency, and recovery protocols.',
+    imageUrl: deskHeroImg,
+    accentColor: 'orange',
+    lastAccessedAt: '2026-03-21T16:40:00Z',
+    chapters: [
+      {
+        id: 'ch-cs304-1',
+        number: 1,
+        title: 'Normalization, Functional Dependencies & Decomposition',
+        overview:
+          'Armstrong’s axioms, attribute closures, canonical cover, lossless join verification, and 3NF vs BCNF trade-offs.',
+        learningObjectives: [
+          'Compute minimal canonical covers and candidate keys systematically',
+          'Design dependency-preserving 3NF schemas',
+          'Verify lossless-join property for arbitrary binary decompositions',
+        ],
+        relatedMaterialIds: ['mat-2', 'mat-4'],
+        completed: true,
+        bookmarked: true,
+        lastTopicId: 'tp-cs304-1-1',
+        personalChapterNotes:
+          '3NF is always both lossless and dependency-preserving. BCNF guarantees zero FD-based redundancy but may lose dependency preservation.',
+        topics: [
+          {
+            id: 'tp-cs304-1-1',
+            title: 'Candidate Keys, 3NF & BCNF Decomposition',
+            summary: 'Identifying prime attributes and eliminating transitive or partial dependencies.',
+            keyConcepts: ['Superkey vs Candidate key', 'Lossless join condition', 'Dependency preservation'],
+            studyNotes:
+              'For FD X -> Y in R: BCNF requires X to be a superkey. 3NF allows X to be a non-superkey ONLY if every attribute in Y \\ X is a prime attribute (part of some candidate key).',
+            estimatedMinutes: 40,
+            completed: true,
+            bookmarked: true,
+          },
+        ],
+      },
+      {
+        id: 'ch-cs304-2',
+        number: 2,
+        title: 'Transactions, Serializability & Two-Phase Locking',
+        overview:
+          'Conflict vs view serializability, precedence graphs, Strict 2PL, deadlock prevention, and ARIES write-ahead logging.',
+        learningObjectives: [
+          'Construct precedence graphs to test conflict serializability',
+          'Compare Strict 2PL, Timestamp Ordering, and MVCC',
+          'Trace UNDO/REDO phases in crash recovery',
+        ],
+        relatedMaterialIds: ['mat-2', 'mat-7'],
+        completed: false,
+        bookmarked: false,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-cs304-2-1',
+            title: 'Conflict Serializability & Recoverable Schedules',
+            summary: 'Testing acyclic conflict graphs and preventing cascading aborts.',
+            keyConcepts: ['Read-Write / Write-Write conflicts', 'Cascadeless schedule', 'Strict 2PL'],
+            studyNotes:
+              'Draw directed edge Ti -> Tj whenever an operation in Ti precedes and conflicts with an operation in Tj on the same data item (at least one is a Write). Schedule is conflict-serializable iff the graph is acyclic.',
+            estimatedMinutes: 35,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'subj-phy12',
+    code: 'PHY-12',
+    name: 'Electrostatics & Electromagnetism (Class 12)',
+    level: 'Class 11 & 12',
+    course: 'CBSE / JEE Science Stream',
+    semesterOrClass: 'Class 12',
+    description:
+      'Gauss’s Law symmetry applications, electric potential & capacitance, Kirchhoff networks, Biot-Savart law, and Faraday induction.',
+    imageUrl: stemImg,
+    accentColor: 'emerald',
+    lastAccessedAt: '2026-03-20T14:00:00Z',
+    chapters: [
+      {
+        id: 'ch-phy12-1',
+        number: 1,
+        title: 'Gauss’s Law & Electric Potential',
+        overview:
+          'Electric flux through closed Gaussian surfaces, symmetric charge distributions, and conservative field-potential relations.',
+        learningObjectives: [
+          'Apply Gauss’s Law to spherical, cylindrical, and planar symmetries',
+          'Derive E = -∇V for conservative electrostatic fields',
+        ],
+        relatedMaterialIds: ['mat-3', 'mat-8'],
+        completed: false,
+        bookmarked: false,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-phy12-1-1',
+            title: 'Electric Flux & Symmetric Gaussian Surfaces',
+            summary: 'Computing enclosed charge and flux across non-uniform fields.',
+            keyConcepts: ['Φ = ∮ E · dA = q_enc / ε₀', 'Solid angle invariance', 'Conductor cavity shielding'],
+            studyNotes:
+              'Gauss’s Law always holds, but is useful for finding E only when symmetry keeps |E| constant over parts of the Gaussian surface and parallel/perpendicular to dA.',
+            estimatedMinutes: 30,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'subj-gate-cs',
+    code: 'GATE-CS',
+    name: 'GATE CS Quantitative & Core Revision',
+    level: 'Competitive Exams',
+    course: 'GATE Computer Science & IT',
+    semesterOrClass: 'Target 2027',
+    description:
+      'High-weightage GATE CS problem sets across Operating Systems, Computer Networks, Discrete Math, and Engineering Aptitude.',
+    imageUrl: examPrepImg,
+    accentColor: 'indigo',
+    lastAccessedAt: '2026-03-19T18:20:00Z',
+    chapters: [
+      {
+        id: 'ch-gate-1',
+        number: 1,
+        title: 'Virtual Memory, Paging & TLB Hit Ratios',
+        overview:
+          'Effective Memory Access Time (EMAT), multi-level page table sizing, inverted page tables, and Belady’s anomaly.',
+        learningObjectives: [
+          'Compute page table size in bytes given virtual/physical address widths',
+          'Calculate EMAT with TLB hit ratio and page-fault penalty',
+        ],
+        relatedMaterialIds: ['mat-9'],
+        completed: false,
+        bookmarked: true,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-gate-1-1',
+            title: 'EMAT & Multi-Level Page Table Calculations',
+            summary: 'Exact numerical methodology for single and 2-level paging problems.',
+            keyConcepts: ['TLB hit/miss timing', 'Page offset bits', 'Frame number sizing'],
+            studyNotes:
+              'EMAT = h * (c_TLB + m) + (1 - h) * (c_TLB + k * m), where h is TLB hit ratio, c_TLB is TLB lookup time, m is main memory cycle time, and k is page table walk levels + 1.',
+            estimatedMinutes: 35,
+            completed: false,
+            bookmarked: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'subj-pg-ml',
+    code: 'CS-610',
+    name: 'Statistical Machine Learning & Optimization',
+    level: 'Postgraduate',
+    course: 'M.Tech / MS AI & Data Science',
+    semesterOrClass: 'Postgraduate Sem 2',
+    description:
+      'Convex optimization, PAC learning bounds, VC dimension, kernel methods, EM algorithm, and variational inference.',
+    imageUrl: csAlgoImg,
+    accentColor: 'slate',
+    lastAccessedAt: '2026-03-18T11:00:00Z',
+    chapters: [
+      {
+        id: 'ch-pgml-1',
+        number: 1,
+        title: 'Convexity, KKT Conditions & Gradient Convergence',
+        overview:
+          'Strong convexity, L-smoothness, primal-dual Lagrangian duality, and SVM margin dual formulation.',
+        learningObjectives: [
+          'Derive KKT optimality conditions for constrained convex problems',
+          'Prove O(1/k) convergence rate for gradient descent on smooth convex objectives',
+        ],
+        relatedMaterialIds: ['mat-5'],
+        completed: false,
+        bookmarked: false,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-pgml-1-1',
+            title: 'Lagrangian Duality & Complementary Slackness',
+            summary: 'Formulating dual objectives and interpreting support vector active constraints.',
+            keyConcepts: ['Slater’s condition', 'Dual feasibility', 'Support vectors α_i > 0'],
+            studyNotes:
+              'At optimal primal-dual pair (x*, λ*), complementary slackness enforces λ_i* g_i(x*) = 0. In hard-margin SVMs, only points on the margin boundary have nonzero dual multipliers.',
+            estimatedMinutes: 40,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'subj-sch-10',
+    code: 'SCI-10',
+    name: 'Secondary Science & Foundations (Class 10)',
+    level: 'School',
+    course: 'NCERT / CBSE Board Foundation',
+    semesterOrClass: 'Class 10',
+    description:
+      'Chemical reactions & equations, optics ray diagrams, electricity circuits, and quadratic foundations for board excellence.',
+    imageUrl: deskHeroImg,
+    accentColor: 'blue',
+    lastAccessedAt: '2026-03-17T10:00:00Z',
+    chapters: [
+      {
+        id: 'ch-sch10-1',
+        number: 1,
+        title: 'Light: Reflection & Refraction',
+        overview:
+          'Concave/convex mirror formula, Snell’s law, lens magnification sign conventions, and power of a lens.',
+        learningObjectives: [
+          'Apply New Cartesian Sign Convention accurately in numericals',
+          'Compute refractive index and critical angle relationships',
+        ],
+        relatedMaterialIds: ['mat-8'],
+        completed: false,
+        bookmarked: false,
+        personalChapterNotes: '',
+        topics: [
+          {
+            id: 'tp-sch10-1-1',
+            title: 'Mirror & Lens Formula Sign Conventions',
+            summary: 'Object distance u, focal length f, and real vs virtual magnification signs.',
+            keyConcepts: ['1/f = 1/v + 1/u (Mirror)', '1/f = 1/v - 1/u (Lens)', 'Power P = 1/f(m) Dioptre'],
+            studyNotes:
+              'Remember: u is always negative when object is placed to the left of the mirror/lens. Convex mirror and convex lens always have positive focal length; concave mirror and concave lens have negative focal length.',
+            estimatedMinutes: 25,
+            completed: false,
+            bookmarked: false,
+          },
+        ],
+      },
+    ],
+  },
+];
+
+export const INITIAL_MATERIALS: StudyMaterialItem[] = [
+  {
+    id: 'mat-1',
+    title: 'Dynamic Programming on Trees & DAGs — Complete Lecture Notes',
+    subjectId: 'subj-cs302',
+    subjectName: 'Design & Analysis of Algorithms',
+    chapterName: 'Dynamic Programming on Trees & DAGs',
+    semester: 'Semester 6',
+    category: 'PDF Notes',
+    uploadedBy: 'Curated Sample · Prof. Arvind K.',
+    uploadDate: '2026-03-12',
+    fileType: 'PDF',
+    fileSize: '3.2 MB',
+    pages: 28,
+    downloads: 384,
+    description:
+      'Full derivations of post-order tree DP, rerooting algorithms, weighted independent sets, and DAG topological relaxation.',
+    previewContent:
+      'SECTION 1: TREE DP INVARIANTS\n\n1. Root the tree arbitrarily at node 1.\n2. Maintain dp[u][0] (exclude u) and dp[u][1] (include u).\n3. Merge children in post-order DFS so every child state is finalized before its parent.\n\nComplexity: O(V) time, O(V) recursion stack space.',
+    bookmarked: true,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-2',
+    title: 'DBMS Normalization & Concurrency Control Study Guide',
+    subjectId: 'subj-cs304',
+    subjectName: 'Database Management Systems',
+    chapterName: 'Normalization, Functional Dependencies & Decomposition',
+    semester: 'Semester 6',
+    category: 'Study Guides',
+    uploadedBy: 'Curated Sample · Academic Council',
+    uploadDate: '2026-03-10',
+    fileType: 'PDF',
+    fileSize: '2.4 MB',
+    pages: 19,
+    downloads: 512,
+    description:
+      'Step-by-step recipe for canonical covers, 3NF synthesis algorithm, BCNF decomposition, and Strict 2PL vs Timestamp ordering.',
+    previewContent:
+      '3NF SYNTHESIS ALGORITHM\n\nStep 1: Compute canonical cover Fc of F.\nStep 2: For each FD X -> Y in Fc, create relation schema XY.\nStep 3: If no schema contains a candidate key of R, add one schema containing a candidate key.\nStep 4: Remove redundant schemas contained inside another.',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-3',
+    title: 'Electrostatics Formula & Gaussian Symmetry Handwritten Sheet',
+    subjectId: 'subj-phy12',
+    subjectName: 'Electrostatics & Electromagnetism (Class 12)',
+    chapterName: 'Gauss’s Law & Electric Potential',
+    semester: 'Class 12',
+    category: 'Handwritten Notes',
+    uploadedBy: 'Curated Sample · Topper Archive',
+    uploadDate: '2026-03-08',
+    fileType: 'PDF',
+    fileSize: '1.8 MB',
+    pages: 10,
+    downloads: 294,
+    description:
+      'Clean handwritten derivations for sphere, shell, infinite wire, and infinite plane charge fields with boundary graphs.',
+    previewContent:
+      'SUMMARY OF SYMMETRIC FIELDS\n• Infinite line charge (λ): E = λ / (2π ε₀ r)\n• Infinite sheet (σ): E = σ / (2 ε₀)\n• Conducting sheet: E = σ / ε₀\n• Solid uniformly charged sphere (r < R): E = ρ r / (3 ε₀)',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-4',
+    title: 'SQL & Relational Algebra Quick Reference Text Notes',
+    subjectId: 'subj-cs304',
+    subjectName: 'Database Management Systems',
+    chapterName: 'Normalization, Functional Dependencies & Decomposition',
+    semester: 'Semester 6',
+    category: 'Text Notes',
+    uploadedBy: 'Curated Sample · CS Study Circle',
+    uploadDate: '2026-03-14',
+    fileType: 'TXT',
+    fileSize: '420 KB',
+    pages: 6,
+    downloads: 175,
+    description:
+      'Concise plain-text cheat sheet comparing relational algebra division, theta-joins, correlated subqueries, and window functions.',
+    previewContent:
+      'RELATIONAL ALGEBRA OPERATORS\nσ (Selection), π (Projection), ⋈ (Natural Join), ÷ (Division).\nNote: R ÷ S returns tuples in R[A-B] associated with ALL tuples in S[B].',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-5',
+    title: 'Convex Optimization & KKT Slides Deck',
+    subjectId: 'subj-pg-ml',
+    subjectName: 'Statistical Machine Learning & Optimization',
+    chapterName: 'Convexity, KKT Conditions & Gradient Convergence',
+    semester: 'Postgraduate Sem 2',
+    category: 'Presentations',
+    uploadedBy: 'Curated Sample · ML Lab',
+    uploadDate: '2026-03-05',
+    fileType: 'PPTX',
+    fileSize: '4.6 MB',
+    pages: 34,
+    downloads: 142,
+    description:
+      'Lecture deck covering subgradients, Slater’s condition, primal-dual gaps, and support vector optimization.',
+    previewContent:
+      'SLIDE HIGHLIGHTS: KKT CONDITIONS\n1. Stationarity: ∇f(x*) + Σ λ_i ∇g_i(x*) + Σ ν_j ∇h_j(x*) = 0\n2. Primal Feasibility: g_i(x*) <= 0, h_j(x*) = 0\n3. Dual Feasibility: λ_i >= 0\n4. Complementary Slackness: λ_i g_i(x*) = 0',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-6',
+    title: 'CLRS Algorithms Reference Chapters Annotated Summary',
+    subjectId: 'subj-cs302',
+    subjectName: 'Design & Analysis of Algorithms',
+    chapterName: 'Network Flows & Bipartite Matching',
+    semester: 'Semester 6',
+    category: 'Reference Books',
+    uploadedBy: 'Curated Sample · Library Index',
+    uploadDate: '2026-02-28',
+    fileType: 'PDF',
+    fileSize: '6.1 MB',
+    pages: 52,
+    downloads: 468,
+    description:
+      'Structured companion reference notes for CLRS Chapters 4, 15, and 26 with worked recurrence and max-flow proofs.',
+    previewContent:
+      'MAX-FLOW MIN-CUT COROLLARY\nIn Edmonds-Karp, BFS chooses shortest augmenting paths in unweighted edge count. Every edge can become critical at most V/2 times, yielding O(V E^2) worst-case runtime.',
+    bookmarked: true,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-7',
+    title: 'DBMS Most Important Mid-Sem Questions Bank (Solved)',
+    subjectId: 'subj-cs304',
+    subjectName: 'Database Management Systems',
+    chapterName: 'Transactions, Serializability & Two-Phase Locking',
+    semester: 'Semester 6',
+    category: 'Important Questions',
+    uploadedBy: 'Curated Sample · Dept. Review',
+    uploadDate: '2026-03-16',
+    fileType: 'PDF',
+    fileSize: '1.9 MB',
+    pages: 14,
+    downloads: 340,
+    description:
+      'Curated set of 25 high-frequency university exam questions on precedence graphs, deadlocks, and B+ tree order math.',
+    previewContent:
+      'IMPORTANT QUESTION #4\nTest whether schedule S: R1(X), W2(X), R2(Y), W1(Y), C1, C2 is conflict serializable.\nAnswer: Edges T1->T2 (on X) and T2->T1 (on Y) form a cycle, so S is NOT conflict serializable.',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-8',
+    title: 'NCERT Ray Optics & Sign Convention Formula Pack',
+    subjectId: 'subj-sch-10',
+    subjectName: 'Secondary Science & Foundations (Class 10)',
+    chapterName: 'Light: Reflection & Refraction',
+    semester: 'Class 10',
+    category: 'Subject-wise Resources',
+    uploadedBy: 'Curated Sample · Science Faculty',
+    uploadDate: '2026-03-04',
+    fileType: 'PDF',
+    fileSize: '1.2 MB',
+    pages: 8,
+    downloads: 215,
+    description:
+      'Board-focused ray diagrams, mirror/lens formulas, magnification rules, and solved numerical templates.',
+    previewContent:
+      'CONCAVE MIRROR MAGNIFICATION\nm = -v/u = h_i / h_o. Real & inverted images have negative m; virtual & erect images have positive m.',
+    bookmarked: false,
+    isVerifiedSample: true,
+  },
+  {
+    id: 'mat-9',
+    title: 'GATE CS OS Paging & Virtual Memory Solved PYQ Set',
+    subjectId: 'subj-gate-cs',
+    subjectName: 'GATE CS Quantitative & Core Revision',
+    chapterName: 'Virtual Memory, Paging & TLB Hit Ratios',
+    semester: 'Target 2027',
+    category: 'Previous Year Papers',
+    uploadedBy: 'Curated Sample · GATE Archive',
+    uploadDate: '2026-03-18',
+    fileType: 'PDF',
+    fileSize: '2.9 MB',
+    pages: 22,
+    downloads: 620,
+    description:
+      'Verified sample GATE numericals covering 2-level page tables, TLB effective access times, and thrashing prevention.',
+    previewContent:
+      'SAMPLE GATE NUMERICAL\nVirtual address = 32 bits, Page size = 4 KB, PTE = 4 bytes.\nNumber of pages = 2^20. Single-level page table size = 2^20 * 4B = 4 MB.',
+    bookmarked: true,
+    isVerifiedSample: true,
+  },
+];
+
+export const INITIAL_NOTES: PersonalNote[] = [
+  {
+    id: 'note-1',
+    title: 'Tree DP & Rerooting Quick Template',
+    description: 'Two-pass DFS pattern for subtree size and distance sum queries.',
+    content:
+      '# Tree DP Rerooting Checklist\n\n- **Pass 1 (Bottom-Up)**: Compute `sz[u]` and `down[u]` rooted at node 1.\n- **Pass 2 (Top-Down)**: For edge `u -> v`, shift root via:\n```\nans[v] = ans[u] - sz[v] + (N - sz[v])\n```\n- Edge case: Single-node tree `N = 1` returns `0`.',
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-2',
+    pinned: true,
+    bookmarked: true,
+    createdAt: '2026-03-18T10:30:00Z',
+    updatedAt: '2026-03-21T15:10:00Z',
+  },
+  {
+    id: 'note-2',
+    title: 'DBMS BCNF vs 3NF Decision Rules',
+    description: 'Rapid check before mid-semester normalization proofs.',
+    content:
+      '## Normal Form Criteria\n\nFor every non-trivial FD `X -> A`:\n- **BCNF**: `X` must be a superkey.\n- **3NF**: `X` is a superkey OR `A` is a prime attribute.\n\n*Always verify lossless join:* `R1 ∩ R2` must be a superkey of either `R1` or `R2`.',
+    subjectId: 'subj-cs304',
+    chapterId: 'ch-cs304-1',
+    pinned: false,
+    bookmarked: true,
+    createdAt: '2026-03-15T09:00:00Z',
+    updatedAt: '2026-03-19T12:45:00Z',
+  },
+];
+
+export const INITIAL_PAPERS: QuestionPaper[] = [
+  {
+    id: 'pyq-cs302-2025',
+    title: 'CS-302 Design & Analysis of Algorithms — Mid-Sem Sample Archive (2025)',
+    subjectId: 'subj-cs302',
+    subjectName: 'Design & Analysis of Algorithms',
+    course: 'B.Tech CS & AI',
+    semester: 'Semester 6',
+    year: 2025,
+    examType: 'Mid-Sem',
+    durationMinutes: 90,
+    totalMarks: 50,
+    fileSize: '1.6 MB',
+    bookmarked: true,
+    isVerifiedSample: true,
+    paperTextPreview:
+      'CURATED SAMPLE PAPER · CS-302 (2025)\nMax Marks: 50 · Duration: 90 Mins\n\nQ1. Solve T(n) = 2T(n/2) + n log n using recursion tree.\nQ2. Design an O(V) Tree DP algorithm for Maximum Weight Independent Set.\nQ3. Prove Max-Flow = Min-Cut on residual graph G_f.',
+    questionIds: ['qb-1', 'qb-2', 'qb-3', 'qb-7'],
+  },
+  {
+    id: 'pyq-cs304-2024',
+    title: 'CS-304 Database Management Systems — End-Sem Sample Archive (2024)',
+    subjectId: 'subj-cs304',
+    subjectName: 'Database Management Systems',
+    course: 'B.Tech CS & AI',
+    semester: 'Semester 6',
+    year: 2024,
+    examType: 'End-Sem',
+    durationMinutes: 180,
+    totalMarks: 100,
+    fileSize: '2.2 MB',
+    bookmarked: false,
+    isVerifiedSample: true,
+    paperTextPreview:
+      'CURATED SAMPLE PAPER · CS-304 (2024)\nMax Marks: 100 · Duration: 180 Mins\n\nQ1. Decompose R(A,B,C,D,E) into 3NF preserving dependencies.\nQ2. Construct precedence graph for interleaved schedule S and test conflict serializability.\nQ3. Compute B+ tree fan-out for 4KB page size.',
+    questionIds: ['qb-4', 'qb-5', 'qb-8', 'qb-9'],
+  },
+  {
+    id: 'pyq-gate-2024',
+    title: 'GATE CS Operating Systems & Memory — Verified Sample Practice Set (2024)',
+    subjectId: 'subj-gate-cs',
+    subjectName: 'GATE CS Quantitative & Core Revision',
+    course: 'GATE CS',
+    semester: 'Target 2027',
+    year: 2024,
+    examType: 'Mock Archive',
+    durationMinutes: 45,
+    totalMarks: 25,
+    fileSize: '1.1 MB',
+    bookmarked: true,
+    isVerifiedSample: true,
+    paperTextPreview:
+      'CURATED GATE SAMPLE SET · VIRTUAL MEMORY (2024)\n\nQ1. Calculate Effective Memory Access Time (EMAT) for 90% TLB hit ratio.\nQ2. Determine page table memory overhead for 32-bit virtual addressing.',
+    questionIds: ['qb-6', 'qb-10'],
+  },
+];
+
+export const INITIAL_QUESTIONS: QuestionBankItem[] = [
+  {
+    id: 'qb-1',
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-1',
+    chapterName: 'Asymptotics, Recurrences & Divide and Conquer',
+    type: 'MCQ',
+    difficulty: 'Medium',
+    question: 'What is the tight asymptotic time complexity of T(n) = 2T(n/2) + n log n?',
+    options: ['Θ(n log n)', 'Θ(n log² n)', 'Θ(n²)', 'Θ(n^(3/2))'],
+    correctAnswer: 'Θ(n log² n)',
+    explanation:
+      'Using Master Theorem Case 2 extended: n^(log₂ 2) = n, and f(n) = n log¹ n. Therefore k = 1, giving T(n) = Θ(n log^(1+1) n) = Θ(n log² n).',
+    marks: 2,
+    isImportant: true,
+    isPyq: true,
+    pyqYear: 2025,
+    bookmarked: true,
+  },
+  {
+    id: 'qb-2',
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-2',
+    chapterName: 'Dynamic Programming on Trees & DAGs',
+    type: 'MSQ',
+    difficulty: 'Hard',
+    question:
+      'Which of the following statements are TRUE about Dynamic Programming on Trees and DAGs? (Select all that apply)',
+    options: [
+      'A rooted tree can be processed bottom-up using DFS post-order in O(V) time.',
+      'Rerooting DP computes answers for all N roots in O(N) time when edge transitions are O(1).',
+      'Longest path in an arbitrary weighted DAG is NP-hard.',
+      'Topological sort guarantees predecessor subproblems are solved before relaxing outgoing edges.',
+    ],
+    correctAnswers: [
+      'A rooted tree can be processed bottom-up using DFS post-order in O(V) time.',
+      'Rerooting DP computes answers for all N roots in O(N) time when edge transitions are O(1).',
+      'Topological sort guarantees predecessor subproblems are solved before relaxing outgoing edges.',
+    ],
+    explanation:
+      'Longest path is NP-hard on general graphs with cycles, NOT on DAGs! On a DAG, longest path is solvable in linear O(V + E) time via topological DP.',
+    marks: 3,
+    isImportant: true,
+    isPyq: true,
+    pyqYear: 2025,
+    bookmarked: true,
+  },
+  {
+    id: 'qb-3',
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-3',
+    chapterName: 'Network Flows & Bipartite Matching',
+    type: 'True/False',
+    difficulty: 'Easy',
+    question:
+      'True or False: The Edmonds-Karp algorithm improves Ford-Fulkerson by selecting shortest augmenting paths in the residual graph using Breadth-First Search (BFS).',
+    options: ['True', 'False'],
+    correctAnswer: 'True',
+    explanation:
+      'True. Choosing shortest augmenting paths (by edge count) via BFS bounds the number of augmentations to O(VE), resulting in O(VE²) worst-case time independent of capacity magnitudes.',
+    marks: 1,
+    isImportant: false,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-4',
+    subjectId: 'subj-cs304',
+    chapterId: 'ch-cs304-1',
+    chapterName: 'Normalization, Functional Dependencies & Decomposition',
+    type: 'Fill in the Blanks',
+    difficulty: 'Medium',
+    question:
+      'A decomposition of relation R into R1 and R2 is guaranteed to be lossless if the common attributes (R1 ∩ R2) form a ________ of either R1 or R2.',
+    correctAnswer: 'superkey',
+    explanation:
+      'By Heath’s theorem, R1 ∩ R2 -> R1 or R1 ∩ R2 -> R2 must hold in F+, which means R1 ∩ R2 must be a superkey of at least one decomposed relation.',
+    marks: 2,
+    isImportant: true,
+    isPyq: true,
+    pyqYear: 2024,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-5',
+    subjectId: 'subj-cs304',
+    chapterId: 'ch-cs304-2',
+    chapterName: 'Transactions, Serializability & Two-Phase Locking',
+    type: 'MCQ',
+    difficulty: 'Medium',
+    question:
+      'In Strict Two-Phase Locking (Strict 2PL), when is a transaction allowed to release its exclusive (X) locks?',
+    options: [
+      'Immediately after writing the data item',
+      'As soon as the growing phase ends',
+      'Only after the transaction commits or aborts',
+      'Before acquiring shared (S) locks',
+    ],
+    correctAnswer: 'Only after the transaction commits or aborts',
+    explanation:
+      'Strict 2PL holds all exclusive locks until commit/abort, preventing dirty reads and guaranteeing cascadeless, recoverable, and conflict-serializable schedules.',
+    marks: 2,
+    isImportant: true,
+    isPyq: true,
+    pyqYear: 2024,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-6',
+    subjectId: 'subj-gate-cs',
+    chapterId: 'ch-gate-1',
+    chapterName: 'Virtual Memory, Paging & TLB Hit Ratios',
+    type: 'MCQ',
+    difficulty: 'Medium',
+    question:
+      'A system has a TLB hit ratio of 90%, TLB lookup time of 10 ns, and main memory access time of 100 ns (single-level page table). What is the Effective Memory Access Time (EMAT)?',
+    options: ['110 ns', '120 ns', '130 ns', '190 ns'],
+    correctAnswer: '120 ns',
+    explanation:
+      'EMAT = 0.90 × (10 + 100) + 0.10 × (10 + 100 + 100) = 0.90 × 110 + 0.10 × 210 = 99 + 21 = 120 ns.',
+    marks: 2,
+    isImportant: true,
+    isPyq: true,
+    pyqYear: 2024,
+    bookmarked: true,
+  },
+  {
+    id: 'qb-7',
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-1',
+    chapterName: 'Asymptotics, Recurrences & Divide and Conquer',
+    type: 'Short Answer',
+    difficulty: 'Medium',
+    question:
+      'Briefly explain why the Median-of-Medians algorithm uses group size 5 instead of group size 3 to achieve linear O(n) worst-case selection.',
+    modelAnswer:
+      'With group size 3, the two recursive calls become T(n/3) + T(2n/3), whose fractions sum to 1 (giving O(n log n)). With group size 5, at least 3n/10 elements are discarded, yielding T(n/5) + T(7n/10) + O(n); since 1/5 + 7/10 = 9/10 < 1, the recursion sums to O(n).',
+    explanation:
+      'Key grading criterion: state the recurrence fractions (1/3 + 2/3 = 1 vs 1/5 + 7/10 = 9/10 < 1) and resulting asymptotic time complexity.',
+    marks: 3,
+    isImportant: true,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-8',
+    subjectId: 'subj-cs304',
+    chapterId: 'ch-cs304-1',
+    chapterName: 'Normalization, Functional Dependencies & Decomposition',
+    type: 'Long Answer',
+    difficulty: 'Hard',
+    question:
+      'Compare 3NF and BCNF with respect to redundancy elimination, lossless join guarantees, and dependency preservation. Give an example relation in 3NF that violates BCNF.',
+    modelAnswer:
+      '1) Redundancy: BCNF eliminates all FD-induced redundancy (every determinant of a non-trivial FD must be a superkey). 3NF permits non-superkey determinants if the RHS attribute is prime.\n2) Trade-off: 3NF always admits a lossless AND dependency-preserving decomposition via Bernstein’s synthesis. BCNF always admits a lossless decomposition, but may fail dependency preservation.\n3) Classic counterexample: R(A, B, C) with FDs {AB -> C, C -> B}. Candidate keys are AB and AC. Because B is prime, C -> B satisfies 3NF, yet C is not a superkey so R violates BCNF.',
+    explanation:
+      'Include all three criteria: determinant condition, preservation vs redundancy trade-off, and a concrete 3-attribute counterexample.',
+    marks: 5,
+    isImportant: true,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-9',
+    subjectId: 'subj-cs304',
+    chapterId: 'ch-cs304-2',
+    chapterName: 'Transactions, Serializability & Two-Phase Locking',
+    type: 'True/False',
+    difficulty: 'Easy',
+    question: 'True or False: Every conflict-serializable schedule is also view-serializable.',
+    options: ['True', 'False'],
+    correctAnswer: 'True',
+    explanation:
+      'True. Conflict serializability is a strict subset of view serializability (view serializability additionally allows blind writes that produce the same final writes and reads-from mapping).',
+    marks: 1,
+    isImportant: false,
+    bookmarked: false,
+  },
+  {
+    id: 'qb-10',
+    subjectId: 'subj-phy12',
+    chapterId: 'ch-phy12-1',
+    chapterName: 'Gauss’s Law & Electric Potential',
+    type: 'MCQ',
+    difficulty: 'Easy',
+    question:
+      'What is the electric field intensity inside a uniformly charged thin spherical shell of radius R carrying total charge Q?',
+    options: ['Zero', 'kQ / R²', 'kQr / R³', 'σ / ε₀'],
+    correctAnswer: 'Zero',
+    explanation:
+      'Drawing a concentric Gaussian sphere of radius r < R encloses q_enc = 0. By spherical symmetry and Gauss’s Law, E = 0 everywhere inside the shell.',
+    marks: 1,
+    isImportant: true,
+    bookmarked: false,
+  },
+];
+
+export const INITIAL_REMINDERS: StudyReminder[] = [
+  {
+    id: 'rem-1',
+    title: 'Complete Rerooting DP topic & solve 2 tree problems',
+    type: 'Chapter Completion',
+    subjectId: 'subj-cs302',
+    dueDateTime: 'Today · 6:00 PM',
+    completed: false,
+    syncedToNotifications: true,
+    notes: 'Review Two-Pass DFS formula before CS-302 tutorial.',
+  },
+  {
+    id: 'rem-2',
+    title: 'Attempt CS-304 DBMS Practice Test (Timed 20m)',
+    type: 'Practice Test',
+    subjectId: 'subj-cs304',
+    dueDateTime: 'Tomorrow · 10:00 AM',
+    completed: false,
+    syncedToNotifications: false,
+    notes: 'Focus on conflict graphs & 3NF decomposition.',
+  },
+];
+
+export const INITIAL_WEEKLY_LOGS: DailyStudyLog[] = [
+  { dayLabel: 'Mon', dateIso: '2026-03-16', minutes: 95, isRecordedUserActivity: false },
+  { dayLabel: 'Tue', dateIso: '2026-03-17', minutes: 120, isRecordedUserActivity: false },
+  { dayLabel: 'Wed', dateIso: '2026-03-18', minutes: 75, isRecordedUserActivity: false },
+  { dayLabel: 'Thu', dateIso: '2026-03-19', minutes: 145, isRecordedUserActivity: false },
+  { dayLabel: 'Fri', dateIso: '2026-03-20', minutes: 110, isRecordedUserActivity: false },
+  { dayLabel: 'Sat', dateIso: '2026-03-21', minutes: 165, isRecordedUserActivity: false },
+  { dayLabel: 'Today', dateIso: '2026-03-22', minutes: 90, isRecordedUserActivity: true },
+];
+
+export const INITIAL_STUDY_HUB_STATE: StudyHubState = {
+  subjects: INITIAL_SUBJECTS,
+  materials: INITIAL_MATERIALS,
+  notes: INITIAL_NOTES,
+  papers: INITIAL_PAPERS,
+  questions: INITIAL_QUESTIONS,
+  testHistory: [
+    {
+      id: 'hist-sample-1',
+      title: 'CS-302 Chapter 1 Baseline Check (Sample)',
+      mode: 'Chapter Test',
+      subjectId: 'subj-cs302',
+      date: '2026-03-20',
+      totalQuestions: 4,
+      correct: 3,
+      incorrect: 1,
+      unattempted: 0,
+      score: 6,
+      maxScore: 8,
+      accuracyPercent: 75,
+      timeTakenSeconds: 310,
+      answersDetail: [],
+    },
+  ],
+  uploads: [],
+  reminders: INITIAL_REMINDERS,
+  weeklyLogs: INITIAL_WEEKLY_LOGS,
+  dailyGoalMinutes: 180,
+  recentSearches: ['Dynamic Programming on Trees', '3NF vs BCNF', 'EMAT GATE'],
+  activeReadingPosition: {
+    subjectId: 'subj-cs302',
+    chapterId: 'ch-cs302-2',
+    topicId: 'tp-cs302-2-2',
+  },
+};

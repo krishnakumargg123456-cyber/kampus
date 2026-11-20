@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local database and backups
+.kampus_*_db.json
+.kampus_backups/
+.env
+.env.*
+!.env.example

@@ -1,0 +1,1221 @@
+﻿import React, { createContext, useContext, useState, useEffect } from 'react';
+import {
+  CollaborativeGoal,
+  GroupRole,
+  GroupVisibility,
+  MatchCompatibility,
+  MyStudyPreferences,
+  SafetyReportEntry,
+  SmartMatchSection,
+  StudentPeerProfile,
+  StudyGroup,
+  StudyPartnerState,
+  StudyPartnerTab,
+  StudyRequest,
+  StudySession,
+} from '../types/studyPartner';
+import { INITIAL_STUDY_PARTNER_STATE } from '../data/studyPartnerData';
+import { useAuth } from './AuthContext';
+import { useNotifications } from './NotificationContext';
+import { sendAiChatMessage } from '../services/kampusAiService';
+
+const STORAGE_KEY = 'kampus_studypartner_state_v1';
+const STUDY_ROOM_HANDOFF_KEY = 'kampus_study_room_handoff_v1';
+const CHAT_HANDOFF_KEY = 'kampus_chat_handoff_v1';
+const PLANNER_PARTNER_SESSIONS_KEY = 'kampus_planner_partner_sessions_v1';
+const AI_HANDOFF_KEY = 'kampus_ai_handoff_v1';
+
+export function computeMatchCompatibility(
+  me: MyStudyPreferences,
+  myCourse: string,
+  peer: StudentPeerProfile
+): MatchCompatibility {
+  const hasEnoughData =
+    me.subjects.length > 0 &&
+    (me.preferredTimes.length > 0 || me.learningStyles.length > 0 || me.learningGoals.length > 0);
+
+  if (!hasEnoughData) {
+    return {
+      score: null,
+      hasEnoughData: false,
+      reasons: ['Add subjects & study preferences to calculate compatibility.'],
+      commonSubjects: [],
+    };
+  }
+
+  const reasons: string[] = [];
+  let earnedPoints = 0;
+  const maxPoints = 100;
+
+  // 1. Common subjects (up to 35 pts)
+  const mySubLower = me.subjects.map((s) => s.toLowerCase().trim());
+  const commonSubjects = peer.subjects.filter((s) =>
+    mySubLower.some(
+      (ms) => ms === s.toLowerCase().trim() || s.toLowerCase().includes(ms) || ms.includes(s.toLowerCase())
+    )
+  );
+  if (commonSubjects.length > 0) {
+    earnedPoints += Math.min(35, commonSubjects.length * 12);
+    reasons.push(
+      commonSubjects.length === 1
+        ? `You share 1 common subject (${commonSubjects[0]}).`
+        : `You share ${commonSubjects.length} common subjects (${commonSubjects.slice(0, 2).join(', ')}).`
+    );
+  }
+
+  // 2. Exam / academic goals overlap (up to 20 pts)
+  const myExamLower = me.examPreparation.toLowerCase();
+  const peerExamLower = peer.examPreparation.toLowerCase();
+  const examTokens = ['gate', 'neet', 'jee', 'upsc', 'cat', 'semester'];
+  const matchedExamToken = examTokens.find(
+    (tok) => myExamLower.includes(tok) && peerExamLower.includes(tok)
+  );
+  if (matchedExamToken) {
+    earnedPoints += 16;
+    reasons.push(`Both of you are preparing for ${matchedExamToken.toUpperCase()}.`);
+  }
+
+  const goalMatches = peer.learningGoals.filter((g) =>
+    me.learningGoals.some((mg) => {
+      const words = mg.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+      return words.some((w) => g.toLowerCase().includes(w));
+    })
+  );
+  if (goalMatches.length > 0) {
+    earnedPoints += 8;
+    if (!matchedExamToken) {
+      reasons.push(`Aligned study goal: ${goalMatches[0]}`);
+    }
+  }
+
+  // 3. Same or related course / stream (up to 15 pts)
+  const courseMatch =
+    me.stream.toLowerCase() === peer.stream.toLowerCase() ||
+    (myCourse && peer.course.toLowerCase().includes('computer') && myCourse.toLowerCase().includes('computer'));
+  if (courseMatch) {
+    earnedPoints += 15;
+    reasons.push(`Same academic stream (${peer.stream}).`);
+  }
+
+  // 4. Compatible study schedules (up to 12 pts)
+  const commonTimes = peer.preferredTimes.filter((t) => me.preferredTimes.includes(t));
+  if (commonTimes.length > 0) {
+    earnedPoints += 12;
+    reasons.push(`Both prefer ${commonTimes[0].toLowerCase()}.`);
+  }
+
+  // 5. Learning styles & study modes (up to 10 pts)
+  const commonStyles = peer.learningStyles.filter((st) => me.learningStyles.includes(st));
+  if (commonStyles.length > 0) {
+    earnedPoints += 10;
+    reasons.push(`Shared learning style: ${commonStyles[0]}.`);
+  }
+
+  // 6. Preferred language (up to 8 pts)
+  const langMatch =
+    me.preferredLanguage === peer.preferredLanguage ||
+    me.preferredLanguage === 'Bilingual (EN/HI)' &&
+      (peer.preferredLanguage === 'English' || peer.preferredLanguage === 'Hindi');
+  if (langMatch) {
+    earnedPoints += 8;
+    reasons.push(`Compatible study language (${peer.preferredLanguage}).`);
+  }
+
+  const finalScore = Math.min(99, Math.max(0, Math.round((earnedPoints / maxPoints) * 100)));
+
+  return {
+    score: finalScore,
+    hasEnoughData: true,
+    reasons:
+      reasons.length > 0
+        ? reasons
+        : ['Same academic tier; review profile details to check topic overlap.'],
+    commonSubjects,
+  };
+}
+
+interface StudyPartnerContextType {
+  state: StudyPartnerState;
+  activeTab: StudyPartnerTab;
+  setActiveTab: (tab: StudyPartnerTab) => void;
+  selectedPeerProfile: StudentPeerProfile | null;
+  setSelectedPeerId: (id: string | null) => void;
+  toast: { text: string; tone: 'success' | 'info' | 'warning' } | null;
+  dismissToast: () => void;
+  showToast: (text: string, tone?: 'success' | 'info' | 'warning') => void;
+
+  // Match calculation helper
+  getMatchForPeer: (peer: StudentPeerProfile) => MatchCompatibility;
+  getSortedDiscoveryPeers: (section?: SmartMatchSection) => StudentPeerProfile[];
+  canSendRequestToPeer: (peer: StudentPeerProfile) => { allowed: boolean; reason?: string };
+
+  // Discovery & Connection Requests
+  sendStudyRequest: (peerId: string, personalMessage: string) => void;
+  acceptStudyRequest: (requestId: string) => void;
+  declineStudyRequest: (requestId: string) => void;
+  cancelSentRequest: (requestId: string) => void;
+  toggleSavePeer: (peerId: string) => void;
+  ignorePeerRecommendation: (peerId: string) => void;
+  restoreIgnoredPeers: () => void;
+
+  // Partner Management & Safety
+  removePartnerConnection: (peerId: string) => void;
+  blockUser: (peerId: string) => void;
+  unblockUser: (peerId: string) => void;
+  reportSafetyIssue: (
+    targetType: 'profile' | 'group-post',
+    targetId: string,
+    targetName: string,
+    reason: string,
+    details: string
+  ) => void;
+
+  // Study Groups
+  createGroup: (payload: {
+    name: string;
+    description: string;
+    subjects: string[];
+    goals: string[];
+    visibility: GroupVisibility;
+    invitedPartnerIds: string[];
+  }) => string;
+  updateGroup: (
+    groupId: string,
+    updates: Partial<Pick<StudyGroup, 'name' | 'description' | 'subjects' | 'goals' | 'visibility'>>
+  ) => void;
+  deleteGroup: (groupId: string) => void;
+  invitePartnerToGroup: (groupId: string, peerId: string) => void;
+  removeGroupMember: (groupId: string, memberId: string) => void;
+  setGroupMemberRole: (groupId: string, memberId: string, role: GroupRole) => void;
+  addGroupDiscussion: (groupId: string, content: string) => void;
+  reportGroupPost: (groupId: string, postId: string) => void;
+  addGroupResource: (
+    groupId: string,
+    resource: { title: string; type: 'Notes' | 'PYQ Paper' | 'Formula Sheet' | 'Link'; noteSummary: string }
+  ) => void;
+  addGroupTask: (groupId: string, title: string, assignedTo: string) => void;
+  toggleGroupTask: (groupId: string, taskId: string) => void;
+
+  // Sessions & Planner / Study Rooms Handoffs
+  scheduleSession: (payload: {
+    title: string;
+    targetType: 'partner' | 'group';
+    targetId: string;
+    targetName: string;
+    subject: string;
+    dateISO: string;
+    timeSlot: string;
+    durationMinutes: number;
+    objectives: string;
+    prepNotes: string;
+  }) => void;
+  rescheduleSession: (sessionId: string, dateISO: string, timeSlot: string) => void;
+  cancelSession: (sessionId: string) => void;
+  markSessionCompleted: (sessionId: string, actualMinutes?: number) => void;
+  launchSessionInStudyRoom: (payload: {
+    roomName: string;
+    subject: string;
+    objective: string;
+    durationMinutes: number;
+    invitedPartners: string[];
+    sessionId?: string;
+  }) => void;
+
+  // Collaborative Goals
+  createGoal: (payload: {
+    title: string;
+    description: string;
+    subject: string;
+    targetDate: string;
+    assignedMemberIds: string[];
+    tasks: string[];
+  }) => void;
+  toggleGoalTask: (goalId: string, taskId: string) => void;
+  addGoalTask: (goalId: string, text: string) => void;
+  markGoalCompleted: (goalId: string) => void;
+  deleteGoal: (goalId: string) => void;
+
+  // Preferences & Privacy
+  updatePreferences: (updates: Partial<MyStudyPreferences>) => void;
+
+  // Cross-module handoffs
+  prepareChatHandoff: (targetName: string, targetAvatar: string, initialNotice?: string, isGroup?: boolean) => void;
+  prepareAiHandoff: (toolId: 'quiz' | 'planner' | 'notes' | 'explain', payload: Record<string, any>) => void;
+  runPartnerAiAssistant: (prompt: string) => Promise<{ ok: boolean; answer?: string; error?: string }>;
+}
+
+const StudyPartnerContext = createContext<StudyPartnerContextType | undefined>(undefined);
+
+export const StudyPartnerProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
+  const { profile } = useAuth();
+  const { addNotification } = useNotifications();
+
+  const [state, setState] = useState<StudyPartnerState>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.peers) && parsed.preferences) {
+          return {
+            ...INITIAL_STUDY_PARTNER_STATE,
+            ...parsed,
+            preferences: {
+              ...INITIAL_STUDY_PARTNER_STATE.preferences,
+              ...parsed.preferences,
+            },
+          };
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return INITIAL_STUDY_PARTNER_STATE;
+  });
+
+  const [activeTab, setActiveTab] = useState<StudyPartnerTab>('home');
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{
+    text: string;
+    tone: 'success' | 'info' | 'warning';
+  } | null>(null);
+
+  const showToast = (
+    text: string,
+    tone: 'success' | 'info' | 'warning' = 'success'
+  ) => {
+    setToast({ text, tone });
+  };
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4200);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  useEffect(() => {
+    fetch('/api/study-partner/bootstrap')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        if (json && json.success && json.data) {
+          setState((prev) => ({
+            ...prev,
+            ...json.data,
+            preferences: {
+              ...prev.preferences,
+              ...(json.data.preferences || {}),
+            },
+            peers: json.data.peers?.length ? json.data.peers : prev.peers,
+            groups: json.data.groups?.length ? json.data.groups : prev.groups,
+            sessions: json.data.sessions?.length ? json.data.sessions : prev.sessions,
+          }));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Persist Study Partner state & sync upcoming sessions to KAMPUS Planner storage & server
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(
+        PLANNER_PARTNER_SESSIONS_KEY,
+        JSON.stringify(state.sessions.filter((s) => s.status !== 'Cancelled'))
+      );
+    } catch {
+      // ignore quota errors
+    }
+
+    const timer = setTimeout(() => {
+      fetch('/api/study-partner/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state),
+      }).catch(() => {});
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [state]);
+
+  const selectedPeerProfile =
+    state.peers.find((p) => p.id === selectedPeerId && !state.blockedPeerIds.includes(p.id)) ||
+    null;
+
+  const getMatchForPeer = (peer: StudentPeerProfile) =>
+    computeMatchCompatibility(state.preferences, profile.course, peer);
+
+  const getSortedDiscoveryPeers = (section: SmartMatchSection = 'recommended') => {
+    const visible = state.peers.filter(
+      (p) =>
+        !state.blockedPeerIds.includes(p.id) &&
+        !state.ignoredPeerIds.includes(p.id) &&
+        p.visibility !== 'hidden' &&
+        (p.visibility === 'campus-peers' ||
+          p.college.toLowerCase() === profile.college.toLowerCase())
+    );
+
+    return [...visible].sort((a, b) => {
+      const mA = getMatchForPeer(a);
+      const mB = getMatchForPeer(b);
+      if (section === 'best-subjects') {
+        return mB.commonSubjects.length - mA.commonSubjects.length || (mB.score ?? 0) - (mA.score ?? 0);
+      }
+      if (section === 'recently-active') {
+        if (a.isRecentlyActive !== b.isRecentlyActive) return a.isRecentlyActive ? -1 : 1;
+        return (mB.score ?? 0) - (mA.score ?? 0);
+      }
+      return (mB.score ?? 0) - (mA.score ?? 0);
+    });
+  };
+
+  const canSendRequestToPeer = (
+    peer: StudentPeerProfile
+  ): { allowed: boolean; reason?: string } => {
+    if (state.blockedPeerIds.includes(peer.id)) {
+      return { allowed: false, reason: 'Blocked user' };
+    }
+    if (state.connectedPartnerIds.includes(peer.id)) {
+      return { allowed: false, reason: 'Already connected' };
+    }
+    const existingPending = state.requests.find(
+      (r) => r.peerId === peer.id && r.status === 'pending'
+    );
+    if (existingPending) {
+      return {
+        allowed: false,
+        reason:
+          existingPending.direction === 'sent'
+            ? 'Request already sent'
+            : 'Incoming request awaiting your reply',
+      };
+    }
+    if (peer.allowRequestsFrom === 'connections-only') {
+      return { allowed: false, reason: 'Accepts mutual connections only' };
+    }
+    if (peer.allowRequestsFrom === 'same-course-or-exam') {
+      const sameStream =
+        peer.stream.toLowerCase() === state.preferences.stream.toLowerCase();
+      const sameExam =
+        peer.examPreparation.toLowerCase().includes('gate') &&
+        state.preferences.examPreparation.toLowerCase().includes('gate');
+      if (!sameStream && !sameExam) {
+        return {
+          allowed: false,
+          reason: 'Accepts requests from same stream/exam peers only',
+        };
+      }
+    }
+    return { allowed: true };
+  };
+
+  const sendStudyRequest = (peerId: string, personalMessage: string) => {
+    const peer = state.peers.find((p) => p.id === peerId);
+    if (!peer) return;
+    const perm = canSendRequestToPeer(peer);
+    if (!perm.allowed) {
+      showToast(perm.reason || 'Cannot send duplicate request.', 'warning');
+      return;
+    }
+
+    const match = getMatchForPeer(peer);
+    const newReq: StudyRequest = {
+      id: `sreq-${Date.now()}`,
+      direction: 'sent',
+      peerId,
+      message:
+        personalMessage.trim() ||
+        `Hi ${(peer?.name || 'Student').trim().split(/\s+/)[0]}, let's connect on KAMPUS Study Partner to collaborate on ${match.commonSubjects[0] || peer.subjects[0]}.`,
+      sharedInterests:
+        match.commonSubjects.length > 0
+          ? match.commonSubjects
+          : peer.learningStyles.slice(0, 2),
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      dateLabel: 'Just now',
+    };
+
+    setState((prev) => ({
+      ...prev,
+      requests: [newReq, ...prev.requests],
+    }));
+
+    if (state.preferences.notifyOnRequests) {
+      addNotification({
+        title: 'Study Request Saved (Demo Mode)',
+        description: `Your study invitation to ${peer.name} was recorded locally in Study Requests.`,
+        time: 'Just now',
+        type: 'academic',
+        linkRoute: '/connect/study-partner',
+      });
+    }
+
+    showToast(`Study request saved for ${peer.name} (Demo local persistence)`, 'success');
+  };
+
+  const acceptStudyRequest = (requestId: string) => {
+    const req = state.requests.find((r) => r.id === requestId);
+    if (!req || req.status !== 'pending') return;
+    const peer = state.peers.find((p) => p.id === req.peerId);
+
+    setState((prev) => ({
+      ...prev,
+      requests: prev.requests.map((r) =>
+        r.id === requestId ? { ...r, status: 'accepted' } : r
+      ),
+      connectedPartnerIds: prev.connectedPartnerIds.includes(req.peerId)
+        ? prev.connectedPartnerIds
+        : [req.peerId, ...prev.connectedPartnerIds],
+    }));
+
+    if (peer && state.preferences.notifyOnRequests) {
+      addNotification({
+        title: 'New Study Partner Connected',
+        description: `You and ${peer.name} are now connected as Study Partners.`,
+        time: 'Just now',
+        type: 'academic',
+        linkRoute: '/connect/study-partner',
+      });
+    }
+
+    showToast(`Accepted study request from ${peer?.name || 'student'}!`, 'success');
+  };
+
+  const declineStudyRequest = (requestId: string) => {
+    setState((prev) => ({
+      ...prev,
+      requests: prev.requests.map((r) =>
+        r.id === requestId ? { ...r, status: 'declined' } : r
+      ),
+    }));
+    showToast('Request moved to Declined.', 'info');
+  };
+
+  const cancelSentRequest = (requestId: string) => {
+    setState((prev) => ({
+      ...prev,
+      requests: prev.requests.filter((r) => r.id !== requestId),
+    }));
+    showToast('Cancelled your sent study request.', 'info');
+  };
+
+  const toggleSavePeer = (peerId: string) => {
+    setState((prev) => {
+      const exists = prev.savedPeerIds.includes(peerId);
+      const nextSaved = exists
+        ? prev.savedPeerIds.filter((id) => id !== peerId)
+        : [peerId, ...prev.savedPeerIds];
+      showToast(
+        exists ? 'Removed from saved profiles' : 'Saved student profile for later',
+        'info'
+      );
+      return { ...prev, savedPeerIds: nextSaved };
+    });
+  };
+
+  const ignorePeerRecommendation = (peerId: string) => {
+    setState((prev) => ({
+      ...prev,
+      ignoredPeerIds: prev.ignoredPeerIds.includes(peerId)
+        ? prev.ignoredPeerIds
+        : [...prev.ignoredPeerIds, peerId],
+    }));
+    showToast('Hidden from recommendations.', 'info');
+  };
+
+  const restoreIgnoredPeers = () => {
+    setState((prev) => ({ ...prev, ignoredPeerIds: [] }));
+    showToast('Restored previously hidden recommendations.', 'info');
+  };
+
+  const removePartnerConnection = (peerId: string) => {
+    setState((prev) => ({
+      ...prev,
+      connectedPartnerIds: prev.connectedPartnerIds.filter((id) => id !== peerId),
+    }));
+    showToast('Removed partner connection.', 'info');
+  };
+
+  const blockUser = (peerId: string) => {
+    const peer = state.peers.find((p) => p.id === peerId);
+    setState((prev) => ({
+      ...prev,
+      blockedPeerIds: prev.blockedPeerIds.includes(peerId)
+        ? prev.blockedPeerIds
+        : [...prev.blockedPeerIds, peerId],
+      connectedPartnerIds: prev.connectedPartnerIds.filter((id) => id !== peerId),
+      savedPeerIds: prev.savedPeerIds.filter((id) => id !== peerId),
+      requests: prev.requests.map((r) =>
+        r.peerId === peerId && r.status === 'pending'
+          ? { ...r, status: 'declined' }
+          : r
+      ),
+    }));
+    if (selectedPeerId === peerId) {
+      setSelectedPeerId(null);
+    }
+    showToast(`Blocked ${peer?.name || 'user'}. They can no longer view or message you.`, 'info');
+  };
+
+  const unblockUser = (peerId: string) => {
+    setState((prev) => ({
+      ...prev,
+      blockedPeerIds: prev.blockedPeerIds.filter((id) => id !== peerId),
+    }));
+    showToast('User unblocked.', 'info');
+  };
+
+  const reportSafetyIssue = (
+    targetType: 'profile' | 'group-post',
+    targetId: string,
+    targetName: string,
+    reason: string,
+    details: string
+  ) => {
+    const entry: SafetyReportEntry = {
+      id: `rep-${Date.now()}`,
+      targetType,
+      targetId,
+      targetName,
+      reason,
+      details,
+      createdAt: new Date().toISOString(),
+    };
+    setState((prev) => ({
+      ...prev,
+      reports: [entry, ...prev.reports],
+    }));
+    addNotification({
+      title: 'Safety Report Logged',
+      description: `Report against "${targetName}" (${reason}) submitted to campus trust review.`,
+      time: 'Just now',
+      type: 'system',
+    });
+    showToast('Safety report submitted. Thank you for keeping KAMPUS safe.', 'success');
+  };
+
+  const createGroup: StudyPartnerContextType['createGroup'] = (payload) => {
+    const id = `grp-${Date.now()}`;
+    const invitedMembers = payload.invitedPartnerIds
+      .map((pid) => state.peers.find((p) => p.id === pid))
+      .filter((p): p is StudentPeerProfile => Boolean(p))
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        avatarUrl: p.avatarUrl,
+        role: 'member' as GroupRole,
+        courseLabel: `${p.course} Â· ${p.semester}`,
+      }));
+
+    const newGroup: StudyGroup = {
+      id,
+      name: payload.name.trim(),
+      description: payload.description.trim(),
+      subjects: payload.subjects,
+      goals: payload.goals,
+      visibility: payload.visibility,
+      ownerId: 'me',
+      members: [
+        {
+          id: 'me',
+          name: `${profile.name} (You)`,
+          avatarUrl: profile.avatarUrl,
+          role: 'owner',
+          courseLabel: `${profile.course} Â· ${profile.semester}`,
+        },
+        ...invitedMembers,
+      ],
+      discussions: [],
+      resources: [],
+      tasks: [],
+      createdAt: new Date().toISOString(),
+    };
+
+    setState((prev) => ({
+      ...prev,
+      groups: [newGroup, ...prev.groups],
+    }));
+
+    if (invitedMembers.length > 0) {
+      addNotification({
+        title: 'Study Group Created',
+        description: `"${newGroup.name}" created with ${invitedMembers.length} invited partner(s).`,
+        time: 'Just now',
+        type: 'academic',
+        linkRoute: '/connect/study-partner',
+      });
+    }
+
+    showToast(`Created study group "${newGroup.name}"`, 'success');
+    return id;
+  };
+
+  const updateGroup: StudyPartnerContextType['updateGroup'] = (groupId, updates) => {
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        const myMembership = g.members.find((m) => m.id === 'me');
+        if (g.ownerId !== 'me' && myMembership?.role !== 'moderator') return g;
+        return { ...g, ...updates };
+      }),
+    }));
+    showToast('Updated group details.', 'success');
+  };
+
+  const deleteGroup = (groupId: string) => {
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.filter((g) => !(g.id === groupId && g.ownerId === 'me')),
+    }));
+    showToast('Study group deleted.', 'info');
+  };
+
+  const invitePartnerToGroup = (groupId: string, peerId: string) => {
+    const peer = state.peers.find((p) => p.id === peerId);
+    if (!peer || !state.connectedPartnerIds.includes(peerId)) {
+      showToast('You can only invite connected study partners.', 'warning');
+      return;
+    }
+
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        if (g.members.some((m) => m.id === peerId)) return g;
+        return {
+          ...g,
+          members: [
+            ...g.members,
+            {
+              id: peer.id,
+              name: peer.name,
+              avatarUrl: peer.avatarUrl,
+              role: 'member',
+              courseLabel: `${peer.course} Â· ${peer.semester}`,
+            },
+          ],
+        };
+      }),
+    }));
+
+    addNotification({
+      title: 'Added Partner to Study Group',
+      description: `${peer.name} added to your study group workspace.`,
+      time: 'Just now',
+      type: 'academic',
+      linkRoute: '/connect/study-partner',
+    });
+    showToast(`Added ${peer.name} to the group`, 'success');
+  };
+
+  const removeGroupMember = (groupId: string, memberId: string) => {
+    if (memberId === 'me') return;
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId && g.ownerId === 'me'
+          ? { ...g, members: g.members.filter((m) => m.id !== memberId) }
+          : g
+      ),
+    }));
+    showToast('Removed member from study group.', 'info');
+  };
+
+  const setGroupMemberRole = (groupId: string, memberId: string, role: GroupRole) => {
+    if (memberId === 'me') return;
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId && g.ownerId === 'me'
+          ? {
+              ...g,
+              members: g.members.map((m) =>
+                m.id === memberId ? { ...m, role } : m
+              ),
+            }
+          : g
+      ),
+    }));
+    showToast(`Updated member role to ${role}.`, 'info');
+  };
+
+  const addGroupDiscussion = (groupId: string, content: string) => {
+    if (!content.trim()) return;
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId
+          ? {
+              ...g,
+              discussions: [
+                ...g.discussions,
+                {
+                  id: `disc-${Date.now()}`,
+                  authorId: 'me',
+                  authorName: `${profile.name} (You)`,
+                  authorAvatar: profile.avatarUrl,
+                  content: content.trim(),
+                  createdAt: new Date().toISOString(),
+                  dateLabel: 'Just now',
+                },
+              ],
+            }
+          : g
+      ),
+    }));
+  };
+
+  const reportGroupPost = (groupId: string, postId: string) => {
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId
+          ? {
+              ...g,
+              discussions: g.discussions.map((d) =>
+                d.id === postId ? { ...d, isReported: true } : d
+              ),
+            }
+          : g
+      ),
+    }));
+    reportSafetyIssue(
+      'group-post',
+      postId,
+      'Group discussion message',
+      'Inappropriate or off-topic content',
+      'Flagged via Study Group moderation'
+    );
+  };
+
+  const addGroupResource: StudyPartnerContextType['addGroupResource'] = (
+    groupId,
+    resource
+  ) => {
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId
+          ? {
+              ...g,
+              resources: [
+                {
+                  id: `gres-${Date.now()}`,
+                  ...resource,
+                  addedByName: profile.name,
+                  addedAt: 'Just now',
+                },
+                ...g.resources,
+              ],
+            }
+          : g
+      ),
+    }));
+    showToast('Added shared resource to study group.', 'success');
+  };
+
+  const addGroupTask = (groupId: string, title: string, assignedTo: string) => {
+    if (!title.trim()) return;
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId
+          ? {
+              ...g,
+              tasks: [
+                ...g.tasks,
+                {
+                  id: `gt-${Date.now()}`,
+                  title: title.trim(),
+                  assignedTo: assignedTo || profile.name,
+                  completed: false,
+                },
+              ],
+            }
+          : g
+      ),
+    }));
+  };
+
+  const toggleGroupTask = (groupId: string, taskId: string) => {
+    setState((prev) => ({
+      ...prev,
+      groups: prev.groups.map((g) =>
+        g.id === groupId
+          ? {
+              ...g,
+              tasks: g.tasks.map((t) =>
+                t.id === taskId ? { ...t, completed: !t.completed } : t
+              ),
+            }
+          : g
+      ),
+    }));
+  };
+
+  const scheduleSession: StudyPartnerContextType['scheduleSession'] = (payload) => {
+    const newSession: StudySession = {
+      id: `sess-${Date.now()}`,
+      ...payload,
+      status: 'Upcoming',
+      createdAt: new Date().toISOString(),
+    };
+
+    setState((prev) => ({
+      ...prev,
+      sessions: [newSession, ...prev.sessions],
+    }));
+
+    if (state.preferences.notifyOnSessions) {
+      addNotification({
+        title: 'Study Session Scheduled',
+        description: `"${newSession.title}" with ${newSession.targetName} on ${newSession.dateISO} at ${newSession.timeSlot}. Synced to KAMPUS Planner.`,
+        time: 'Just now',
+        type: 'academic',
+        linkRoute: '/tools/planner',
+      });
+    }
+    showToast('Session scheduled & synced to KAMPUS Planner!', 'success');
+  };
+
+  const rescheduleSession = (sessionId: string, dateISO: string, timeSlot: string) => {
+    setState((prev) => ({
+      ...prev,
+      sessions: prev.sessions.map((s) =>
+        s.id === sessionId ? { ...s, dateISO, timeSlot, status: 'Upcoming' } : s
+      ),
+    }));
+    showToast('Session rescheduled and updated in Planner.', 'info');
+  };
+
+  const cancelSession = (sessionId: string) => {
+    setState((prev) => ({
+      ...prev,
+      sessions: prev.sessions.map((s) =>
+        s.id === sessionId ? { ...s, status: 'Cancelled' } : s
+      ),
+    }));
+    showToast('Study session cancelled.', 'info');
+  };
+
+  const markSessionCompleted = (sessionId: string, actualMinutes?: number) => {
+    const target = state.sessions.find((s) => s.id === sessionId);
+    if (!target || target.status === 'Completed') return;
+    const mins = actualMinutes ?? target.durationMinutes;
+    const today = new Date().toISOString().slice(0, 10);
+
+    setState((prev) => ({
+      ...prev,
+      sessions: prev.sessions.map((s) =>
+        s.id === sessionId
+          ? { ...s, status: 'Completed', actualMinutesLogged: mins }
+          : s
+      ),
+      activityLog: [
+        {
+          id: `log-${Date.now()}`,
+          dateISO: today,
+          minutes: mins,
+          type: 'session',
+          label: `Completed "${target.title}"`,
+        },
+        ...prev.activityLog,
+      ],
+    }));
+
+    showToast(`Marked completed & logged ${mins} study minutes!`, 'success');
+  };
+
+  const launchSessionInStudyRoom: StudyPartnerContextType['launchSessionInStudyRoom'] = (
+    payload
+  ) => {
+    try {
+      localStorage.setItem(STUDY_ROOM_HANDOFF_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore
+    }
+  };
+
+  const createGoal: StudyPartnerContextType['createGoal'] = (payload) => {
+    const memberNames = payload.assignedMemberIds.map((id) => {
+      if (id === 'me') return profile.name;
+      return state.peers.find((p) => p.id === id)?.name || 'Partner';
+    });
+
+    const newGoal: CollaborativeGoal = {
+      id: `goal-${Date.now()}`,
+      title: payload.title.trim(),
+      description: payload.description.trim(),
+      subject: payload.subject.trim(),
+      targetDate: payload.targetDate,
+      assignedMemberIds: payload.assignedMemberIds,
+      assignedMemberNames: memberNames,
+      tasks: payload.tasks
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((text, idx) => ({
+          id: `gtask-${Date.now()}-${idx}`,
+          text,
+          completed: false,
+        })),
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    };
+
+    setState((prev) => ({
+      ...prev,
+      goals: [newGoal, ...prev.goals],
+    }));
+
+    if (state.preferences.notifyOnGoals) {
+      addNotification({
+        title: 'Shared Study Goal Created',
+        description: `"${newGoal.title}" created for ${memberNames.join(', ')}.`,
+        time: 'Just now',
+        type: 'academic',
+        linkRoute: '/connect/study-partner',
+      });
+    }
+    showToast(`Created shared study goal "${newGoal.title}"`, 'success');
+  };
+
+  const toggleGoalTask = (goalId: string, taskId: string) => {
+    const today = new Date().toISOString().slice(0, 10);
+    setState((prev) => {
+      let newlyCompletedGoalTitle: string | null = null;
+      const nextGoals = prev.goals.map((g) => {
+        if (g.id !== goalId) return g;
+        const nextTasks = g.tasks.map((t) =>
+          t.id === taskId ? { ...t, completed: !t.completed } : t
+        );
+        const allDone = nextTasks.length > 0 && nextTasks.every((t) => t.completed);
+        if (allDone && g.status !== 'completed') {
+          newlyCompletedGoalTitle = g.title;
+        }
+        return {
+          ...g,
+          tasks: nextTasks,
+          status: allDone ? ('completed' as const) : ('active' as const),
+        };
+      });
+
+      const nextLogs = newlyCompletedGoalTitle
+        ? [
+            {
+              id: `log-${Date.now()}`,
+              dateISO: today,
+              minutes: 0,
+              type: 'goal' as const,
+              label: `Completed goal "${newlyCompletedGoalTitle}"`,
+            },
+            ...prev.activityLog,
+          ]
+        : prev.activityLog;
+
+      return { ...prev, goals: nextGoals, activityLog: nextLogs };
+    });
+  };
+
+  const addGoalTask = (goalId: string, text: string) => {
+    if (!text.trim()) return;
+    setState((prev) => ({
+      ...prev,
+      goals: prev.goals.map((g) =>
+        g.id === goalId
+          ? {
+              ...g,
+              status: 'active',
+              tasks: [
+                ...g.tasks,
+                { id: `gtask-${Date.now()}`, text: text.trim(), completed: false },
+              ],
+            }
+          : g
+      ),
+    }));
+  };
+
+  const markGoalCompleted = (goalId: string) => {
+    const target = state.goals.find((g) => g.id === goalId);
+    if (!target || target.status === 'completed') return;
+    const today = new Date().toISOString().slice(0, 10);
+
+    setState((prev) => ({
+      ...prev,
+      goals: prev.goals.map((g) =>
+        g.id === goalId
+          ? {
+              ...g,
+              status: 'completed',
+              tasks: g.tasks.map((t) => ({ ...t, completed: true })),
+            }
+          : g
+      ),
+      activityLog: [
+        {
+          id: `log-${Date.now()}`,
+          dateISO: today,
+          minutes: 0,
+          type: 'goal',
+          label: `Completed goal "${target.title}"`,
+        },
+        ...prev.activityLog,
+      ],
+    }));
+    showToast(`Marked goal "${target.title}" completed!`, 'success');
+  };
+
+  const deleteGoal = (goalId: string) => {
+    setState((prev) => ({
+      ...prev,
+      goals: prev.goals.filter((g) => g.id !== goalId),
+    }));
+    showToast('Removed study goal.', 'info');
+  };
+
+  const updatePreferences = (updates: Partial<MyStudyPreferences>) => {
+    setState((prev) => ({
+      ...prev,
+      preferences: { ...prev.preferences, ...updates },
+    }));
+    showToast('Saved Study Partner preferences & privacy settings.', 'success');
+  };
+
+  const prepareChatHandoff: StudyPartnerContextType['prepareChatHandoff'] = (
+    targetName,
+    targetAvatar,
+    initialNotice,
+    isGroup = false
+  ) => {
+    try {
+      localStorage.setItem(
+        CHAT_HANDOFF_KEY,
+        JSON.stringify({
+          name: targetName,
+          avatar: targetAvatar,
+          initialNotice,
+          type: isGroup ? 'group' : 'direct',
+        })
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const prepareAiHandoff: StudyPartnerContextType['prepareAiHandoff'] = (
+    toolId,
+    payload
+  ) => {
+    try {
+      localStorage.setItem(
+        AI_HANDOFF_KEY,
+        JSON.stringify({ toolId, payload })
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const runPartnerAiAssistant = async (
+    prompt: string
+  ): Promise<{ ok: boolean; answer?: string; error?: string }> => {
+    try {
+      const authorizedSummary = [
+        `Student Course: ${profile.course} (${profile.semester})`,
+        `Study Subjects: ${state.preferences.subjects.join(', ')}`,
+        `Exam Focus: ${state.preferences.examPreparation}`,
+        `Active Study Goals: ${state.goals
+          .filter((g) => g.status === 'active')
+          .map((g) => g.title)
+          .join('; ') || 'None yet'}`,
+      ].join('\n');
+
+      const res = await sendAiChatMessage({
+        messages: [
+          {
+            role: 'user',
+            content: `${prompt}\n\nAuthorized Study Context:\n${authorizedSummary}`,
+          },
+        ],
+        language: state.preferences.preferredLanguage === 'Hindi' ? 'Hindi' : 'English',
+        learningLevel: 'Intermediate',
+        responseStyle: 'Exam-Oriented Answer',
+      });
+      return { ok: true, answer: res.reply };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'KAMPUS AI backend is currently unavailable or not configured.',
+      };
+    }
+  };
+
+  return (
+    <StudyPartnerContext.Provider
+      value={{
+        state,
+        activeTab,
+        setActiveTab,
+        selectedPeerProfile,
+        setSelectedPeerId,
+        toast,
+        dismissToast: () => setToast(null),
+        showToast,
+        getMatchForPeer,
+        getSortedDiscoveryPeers,
+        canSendRequestToPeer,
+        sendStudyRequest,
+        acceptStudyRequest,
+        declineStudyRequest,
+        cancelSentRequest,
+        toggleSavePeer,
+        ignorePeerRecommendation,
+        restoreIgnoredPeers,
+        removePartnerConnection,
+        blockUser,
+        unblockUser,
+        reportSafetyIssue,
+        createGroup,
+        updateGroup,
+        deleteGroup,
+        invitePartnerToGroup,
+        removeGroupMember,
+        setGroupMemberRole,
+        addGroupDiscussion,
+        reportGroupPost,
+        addGroupResource,
+        addGroupTask,
+        toggleGroupTask,
+        scheduleSession,
+        rescheduleSession,
+        cancelSession,
+        markSessionCompleted,
+        launchSessionInStudyRoom,
+        createGoal,
+        toggleGoalTask,
+        addGoalTask,
+        markGoalCompleted,
+        deleteGoal,
+        updatePreferences,
+        prepareChatHandoff,
+        prepareAiHandoff,
+        runPartnerAiAssistant,
+      }}
+    >
+      {children}
+    </StudyPartnerContext.Provider>
+  );
+};
+
+export const useStudyPartner = () => {
+  const ctx = useContext(StudyPartnerContext);
+  if (!ctx) {
+    throw new Error('useStudyPartner must be used within StudyPartnerProvider');
+  }
+  return ctx;
+};
+

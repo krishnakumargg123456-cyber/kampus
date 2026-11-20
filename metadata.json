@@ -1,0 +1,8 @@
+{
+  "name": "Remix KAMPUS - Your Student Life, Connected",
+  "description": "Premium All-in-One Student Super App. Personalized academic dashboard, study streaks, schedule overview, KAMPUS AI copilot, and seamless campus navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
