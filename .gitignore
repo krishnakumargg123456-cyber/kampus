@@ -31,3 +31,8 @@ kampus_icon_temp/
 .env
 .env.*
 !.env.example
+
+# Temporary and backup source files
+*.backup
+*.backup_*
+*.tmp
