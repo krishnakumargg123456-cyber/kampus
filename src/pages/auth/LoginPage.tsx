@@ -27,7 +27,8 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState('');
 
   // Destination redirect after successful login
-  const from = (location.state as any)?.from?.pathname || '/';
+  const rawFrom = (location.state as any)?.from?.pathname;
+  const from = (rawFrom && rawFrom !== '/login' && rawFrom !== '/register' && rawFrom !== '/sign-in' && rawFrom !== '/sign-up') ? rawFrom : '/';
 
   // Automatically redirect if already authenticated
   React.useEffect(() => {

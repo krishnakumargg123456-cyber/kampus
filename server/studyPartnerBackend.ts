@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -179,33 +180,19 @@ const INITIAL_FALLBACK_STATE: StudyPartnerState = {
   activityLog: [],
 };
 
+
+const studyPartnerStorage = new ModuleStorage<StudyPartnerState>(
+  'study_partner',
+  DB_PATH,
+  () => (INITIAL_FALLBACK_STATE)
+);
+
 function loadDb(): StudyPartnerState {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-      if (data && Array.isArray(data.peers) && data.peers.length > 0) {
-        return {
-          ...INITIAL_FALLBACK_STATE,
-          ...data,
-          peers: data.peers?.length ? data.peers : INITIAL_FALLBACK_STATE.peers,
-          groups: data.groups?.length ? data.groups : INITIAL_FALLBACK_STATE.groups,
-          sessions: data.sessions?.length ? data.sessions : INITIAL_FALLBACK_STATE.sessions,
-        };
-      }
-    }
-  } catch (err) {
-    console.error('[StudyPartnerDB Load Error]:', err);
-  }
-  saveDb(INITIAL_FALLBACK_STATE);
-  return INITIAL_FALLBACK_STATE;
+  return studyPartnerStorage.get();
 }
 
 function saveDb(db: StudyPartnerState): void {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[StudyPartnerDB Save Error]:', err);
-  }
+  studyPartnerStorage.saveSync(db);
 }
 
 export function registerStudyPartnerBackend(app: Express): void {

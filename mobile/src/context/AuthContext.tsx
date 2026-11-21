@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+﻿import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
+import API_BASE_URL from '../config/api';
 
 export interface StudentUser {
   userId: string;
@@ -22,239 +22,247 @@ export interface StudentUser {
   role?: string;
 }
 
+interface AuthResult {
+  success: boolean;
+  error?: string;
+  message?: string;
+  verificationToken?: string;
+}
+
 interface AuthContextType {
   user: StudentUser | null;
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  loginWithPassword: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  sendEmailOtp: (email: string, purpose?: string) => Promise<{ success: boolean; message?: string; error?: string }>;
-  verifyOtpAndLogin: (email: string, code: string) => Promise<{ success: boolean; error?: string }>;
-  registerStudent: (formData: any) => Promise<{ success: boolean; error?: string }>;
-  forgotPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
-  resetPassword: (email: string, code: string, newPass: string) => Promise<{ success: boolean; error?: string }>;
+  loginWithPassword: (email: string, password: string) => Promise<AuthResult>;
+  sendEmailOtp: (email: string, purpose?: string) => Promise<AuthResult>;
+  verifyOtpAndLogin: (email: string, code: string) => Promise<AuthResult>;
+  verifyRegistrationOtp: (email: string, code: string) => Promise<AuthResult>;
+  registerStudent: (formData: any) => Promise<AuthResult>;
+  forgotPassword: (email: string) => Promise<AuthResult>;
+  resetPassword: (email: string, code: string, newPass: string) => Promise<AuthResult>;
   logout: () => Promise<void>;
   updateProfile: (updates: Partial<StudentUser>) => Promise<void>;
 }
 
-const API_BASE_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000' : 'http://localhost:3000';
-
-const DEFAULT_SCHOLAR: StudentUser = {
-  userId: 'usr_priya_2026',
-  fullName: 'Priya Sharma',
-  email: 'priya.sharma@iitb.ac.in',
-  mobile: '+91 98765 43210',
-  college: 'Indian Institute of Technology, Bombay',
-  course: 'B.Tech Computer Science & AI',
-  branch: 'Computer Science',
-  semester: '6',
-  enrollmentNo: '22B030149',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80',
-  bio: 'CS Undergrad passionate about Distributed Systems and Machine Learning. Hackathon organizer at IITB.',
-  interests: ['Machine Learning', 'Cloud Systems', 'Open Source'],
-  skills: ['React Native', 'TypeScript', 'Python', 'Node.js'],
-  verifiedBadge: true,
-  hasCompletedOnboarding: true,
-  role: 'super_admin', // Super Admin enabled for full testing
-};
-
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const TOKEN_KEY = '@kampus_token';
+const USER_KEY = '@kampus_user';
+
+async function apiPost(endpoint: string, body: object) {
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  let data: any = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+
+  return data;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<StudentUser | null>(DEFAULT_SCHOLAR);
-  const [token, setToken] = useState<string | null>('kampus_initial_dev_token');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [user, setUser] = useState<StudentUser | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    loadPersistedAuth();
+    void loadPersistedAuth();
   }, []);
+
+  const persistAuth = async (newToken: string, newUser: StudentUser) => {
+    if (!newToken || !newUser?.userId) {
+      throw new Error('Server returned an invalid authentication response.');
+    }
+
+    await AsyncStorage.setItem(TOKEN_KEY, newToken);
+    await AsyncStorage.setItem(USER_KEY, JSON.stringify(newUser));
+    setToken(newToken);
+    setUser(newUser);
+  };
+
+  const clearAuth = async () => {
+    setToken(null);
+    setUser(null);
+    await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
+  };
 
   const loadPersistedAuth = async () => {
     try {
-      const savedToken = await AsyncStorage.getItem('@kampus_token');
-      const savedUser = await AsyncStorage.getItem('@kampus_user');
-      if (savedToken && savedUser) {
-        setToken(savedToken);
-        setUser(JSON.parse(savedUser));
-      }
-    } catch {
-      // Default to initial scholar
-    }
-  };
+      const [savedToken, savedUser] = await Promise.all([
+        AsyncStorage.getItem(TOKEN_KEY),
+        AsyncStorage.getItem(USER_KEY),
+      ]);
 
-  const loginWithPassword = async (email: string, password: string) => {
-    setIsLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/login-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (data.success && data.user) {
-        setUser(data.user);
-        setToken(data.token);
-        await AsyncStorage.setItem('@kampus_token', data.token);
-        await AsyncStorage.setItem('@kampus_user', JSON.stringify(data.user));
-        return { success: true };
+      if (!savedToken || !savedUser) {
+        await clearAuth();
+        return;
       }
-      return { success: false, error: data.error || 'Invalid credentials' };
+
+      const cachedUser: StudentUser = JSON.parse(savedUser);
+      setToken(savedToken);
+      setUser(cachedUser);
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${savedToken}` },
+        });
+
+        if (response.status === 401) {
+          await clearAuth();
+          return;
+        }
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.user) {
+            await AsyncStorage.setItem(USER_KEY, JSON.stringify(data.user));
+            setUser(data.user);
+          }
+        }
+      } catch {
+        // Retain cached session during temporary network outages.
+      }
     } catch {
-      // Offline fallback
-      if (email.trim() && password.length >= 6) {
-        const fallbackUser: StudentUser = {
-          ...DEFAULT_SCHOLAR,
-          email: email.trim(),
-          fullName: email.split('@')[0],
-        };
-        setUser(fallbackUser);
-        setToken('fallback_offline_token');
-        return { success: true };
-      }
-      return { success: false, error: 'Could not connect to authentication server.' };
+      await clearAuth();
     } finally {
       setIsLoading(false);
     }
   };
 
-  const sendEmailOtp = async (email: string, purpose = 'login') => {
+  const loginWithPassword = async (email: string, password: string): Promise<AuthResult> => {
+    setIsLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, purpose }),
+      const data = await apiPost('/api/auth/login-password', { email, password });
+      await persistAuth(data.token, data.user);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Login failed.' };
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const sendEmailOtp = async (email: string, purpose = 'login'): Promise<AuthResult> => {
+    try {
+      const data = await apiPost('/api/auth/send-otp', { email, purpose });
+      return { success: true, message: data.message };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Could not send OTP.' };
+    }
+  };
+
+  const verifyOtpAndLogin = async (email: string, code: string): Promise<AuthResult> => {
+    setIsLoading(true);
+    try {
+      const data = await apiPost('/api/auth/verify-otp', {
+        email,
+        code,
+        purpose: 'login',
       });
-      const data = await res.json();
-      if (data.success) {
-        return { success: true, message: data.message };
+
+      if (!data.token || !data.user) {
+        return { success: false, error: 'Server did not return a valid login session.' };
       }
-      return { success: false, error: data.error };
-    } catch {
+
+      await persistAuth(data.token, data.user);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'OTP verification failed.' };
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const verifyRegistrationOtp = async (email: string, code: string): Promise<AuthResult> => {
+    try {
+      const data = await apiPost('/api/auth/verify-otp', {
+        email,
+        code,
+        purpose: 'register',
+      });
+
+      if (!data.verificationToken) {
+        return { success: false, error: 'Verification token was not returned by server.' };
+      }
+
       return {
         success: true,
-        message: `Offline mode: A 6-digit OTP has been dispatched to ${email}.`,
+        verificationToken: data.verificationToken,
+        message: data.message,
       };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'OTP verification failed.' };
     }
   };
 
-  const verifyOtpAndLogin = async (email: string, code: string) => {
+  const registerStudent = async (formData: any): Promise<AuthResult> => {
     setIsLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, code, purpose: 'login' }),
-      });
-      const data = await res.json();
-      if (data.success && data.user) {
-        setUser(data.user);
-        setToken(data.token);
-        await AsyncStorage.setItem('@kampus_token', data.token);
-        await AsyncStorage.setItem('@kampus_user', JSON.stringify(data.user));
-        return { success: true };
+      if (!formData.verificationToken) {
+        return { success: false, error: 'Please verify your email before registering.' };
       }
-      return { success: false, error: data.error || 'Verification failed.' };
-    } catch {
-      // Offline fallback verification
-      if (code.length === 6) {
-        const fallbackUser: StudentUser = {
-          ...DEFAULT_SCHOLAR,
-          email: email.trim(),
-          fullName: email.split('@')[0],
-        };
-        setUser(fallbackUser);
-        setToken('fallback_offline_token');
-        return { success: true };
+
+      const data = await apiPost('/api/auth/register', formData);
+
+      if (!data.token || !data.user) {
+        return { success: false, error: 'Registration response is incomplete.' };
       }
-      return { success: false, error: 'Invalid verification code.' };
+
+      await persistAuth(data.token, data.user);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Registration failed.' };
     } finally {
       setIsLoading(false);
     }
   };
 
-  const registerStudent = async (formData: any) => {
-    setIsLoading(true);
+  const forgotPassword = async (email: string): Promise<AuthResult> => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
-      });
-      const data = await res.json();
-      if (data.success && data.user) {
-        setUser(data.user);
-        setToken(data.token);
-        await AsyncStorage.setItem('@kampus_token', data.token);
-        await AsyncStorage.setItem('@kampus_user', JSON.stringify(data.user));
-        return { success: true };
-      }
-      return { success: false, error: data.error };
-    } catch {
-      // Offline fallback
-      const registered: StudentUser = {
-        userId: 'usr_' + Date.now().toString(36),
-        fullName: formData.fullName || 'Student',
-        email: formData.email,
-        mobile: formData.mobile || '',
-        college: formData.college || 'Campus',
-        course: formData.course || 'Undergraduate',
-        branch: formData.branch || 'Engineering',
-        semester: formData.semester || '1',
-        enrollmentNo: formData.enrollmentNo || '',
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80',
-        interests: formData.interests || [],
-        skills: formData.skills || [],
-        verifiedBadge: true,
-        hasCompletedOnboarding: true,
-      };
-      setUser(registered);
-      setToken('offline_token');
-      return { success: true };
-    } finally {
-      setIsLoading(false);
+      const data = await apiPost('/api/auth/forgot-password', { email });
+      return { success: true, message: data.message };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Request failed.' };
     }
   };
 
-  const forgotPassword = async (email: string) => {
+  const resetPassword = async (
+    email: string,
+    code: string,
+    newPass: string,
+  ): Promise<AuthResult> => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+      const data = await apiPost('/api/auth/reset-password', {
+        email,
+        code,
+        newPassword: newPass,
       });
-      const data = await res.json();
-      return { success: data.success, error: data.error };
-    } catch {
-      return { success: true };
-    }
-  };
-
-  const resetPassword = async (email: string, code: string, newPassword: string) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, code, newPassword }),
-      });
-      const data = await res.json();
-      return { success: data.success, error: data.error };
-    } catch {
-      return { success: true };
+      return { success: true, message: data.message };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Password reset failed.' };
     }
   };
 
   const logout = async () => {
-    setUser(null);
-    setToken(null);
-    await AsyncStorage.removeItem('@kampus_token');
-    await AsyncStorage.removeItem('@kampus_user');
+    await clearAuth();
   };
 
   const updateProfile = async (updates: Partial<StudentUser>) => {
     if (!user) return;
     const updated = { ...user, ...updates };
     setUser(updated);
-    await AsyncStorage.setItem('@kampus_user', JSON.stringify(updated));
+    await AsyncStorage.setItem(USER_KEY, JSON.stringify(updated));
   };
 
   return (
@@ -263,10 +271,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         token,
         isLoading,
-        isAuthenticated: !!user,
+        isAuthenticated: !!user && !!token,
         loginWithPassword,
         sendEmailOtp,
         verifyOtpAndLogin,
+        verifyRegistrationOtp,
         registerStudent,
         forgotPassword,
         resetPassword,

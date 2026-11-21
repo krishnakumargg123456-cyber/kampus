@@ -12,6 +12,8 @@ export const SsoCallbackPage: React.FC = () => {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-4">
         <AuthenticateWithRedirectCallback
+          signInUrl="/login"
+          signUpUrl="/register"
           signInForceRedirectUrl="/"
           signUpForceRedirectUrl="/onboarding"
           signInFallbackRedirectUrl="/"

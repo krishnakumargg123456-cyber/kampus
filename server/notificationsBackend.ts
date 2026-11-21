@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -59,29 +60,19 @@ function createEmptyDb(): NotificationsDatabase {
   };
 }
 
+
+const notificationsStorage = new ModuleStorage<NotificationsDatabase>(
+  'notifications',
+  DB_PATH,
+  () => (createEmptyDb())
+);
+
 function loadDb(): NotificationsDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')) as Partial<NotificationsDatabase>;
-      return {
-        notifications: parsed.notifications || [],
-        preferencesByUser: parsed.preferencesByUser || {},
-        pushSubscriptions: parsed.pushSubscriptions || [],
-        announcements: parsed.announcements || [],
-        reminderOverrides: parsed.reminderOverrides || {},
-        roleOverrides: parsed.roleOverrides || {},
-      };
-    }
-  } catch {
-    // rebuild clean database on parse error
-  }
-  const initial = createEmptyDb();
-  saveDb(initial);
-  return initial;
+  return notificationsStorage.get();
 }
 
 function saveDb(db: NotificationsDatabase): void {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  notificationsStorage.saveSync(db);
 }
 
 function safeReadJson<T>(filePath: string): T | null {

@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   AssessmentAttempt,
   CareerOpportunity,
@@ -366,46 +367,18 @@ function createSeedDatabase(): CareerDatabase {
   };
 }
 
+const careerStorage = new ModuleStorage<CareerDatabase>(
+  'career',
+  DB_FILE,
+  () => createSeedDatabase()
+);
+
 function loadDb(): CareerDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.opportunities)) {
-        return {
-          organizations: parsed.organizations || [],
-          opportunities: parsed.opportunities || [],
-          scholarships: parsed.scholarships || [],
-          applications: parsed.applications || [],
-          resumes: parsed.resumes || [],
-          portfoliosByUser: parsed.portfoliosByUser || {},
-          roadmapsByUser: parsed.roadmapsByUser || {},
-          preferencesByUser: parsed.preferencesByUser || {},
-          savedOppIdsByUser: parsed.savedOppIdsByUser || {},
-          viewedOppIdsByUser: parsed.viewedOppIdsByUser || {},
-          notInterestedByUser: parsed.notInterestedByUser || {},
-          interviewHistory: parsed.interviewHistory || [],
-          assessmentAttempts: parsed.assessmentAttempts || [],
-          learningProgressByUser: parsed.learningProgressByUser || {},
-          reports: parsed.reports || [],
-          roleOverrides: parsed.roleOverrides || {},
-          resumeFiles: parsed.resumeFiles || {},
-        };
-      }
-    }
-  } catch {
-    // rebuild cleanly
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return careerStorage.get();
 }
 
 function saveDb(db: CareerDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist Career DB:', err);
-  }
+  careerStorage.saveSync(db);
 }
 
 function readCrossModuleContext(userId: string) {

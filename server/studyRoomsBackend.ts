@@ -2,6 +2,7 @@ import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   PomodoroPhase,
   PomodoroState,
@@ -491,26 +492,14 @@ function createSeedDatabase(): StudyRoomsDatabase {
   };
 }
 
+const studyRoomsStorage = new ModuleStorage<StudyRoomsDatabase>(
+  'study_rooms',
+  DB_PATH,
+  () => createSeedDatabase()
+);
+
 function loadDatabase(): StudyRoomsDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf-8');
-      const parsed = JSON.parse(raw) as StudyRoomsDatabase;
-      if (parsed && Array.isArray(parsed.rooms)) {
-        // Clear stale active sockets on fresh server boot
-        parsed.rooms.forEach((r) => {
-          r.activeParticipantIds = [];
-          r.participants.forEach((p) => {
-            p.activeStatus = 'Away';
-          });
-        });
-        return parsed;
-      }
-    }
-  } catch {
-    // fallback
-  }
-  return createSeedDatabase();
+  return studyRoomsStorage.get();
 }
 
 export function registerStudyRoomsBackend(app: Express): WebSocketServer {
@@ -521,11 +510,7 @@ export function registerStudyRoomsBackend(app: Express): WebSocketServer {
   const allClients = new Set<{ ws: WebSocket; userId: string }>();
 
   const saveDatabase = () => {
-    try {
-      fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-    } catch {
-      // ignore disk errors
-    }
+    studyRoomsStorage.saveSync(db);
   };
 
   const getParticipantRole = (room: StudyRoom, userId: string): RoomRole | null => {

@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -52,38 +53,19 @@ function checkRateLimit(ip: string): boolean {
   return true;
 }
 
+
+const kampusIdStorage = new ModuleStorage<KampusIdDatabase>(
+  'kampus_id',
+  DB_FILE,
+  () => ({ identitiesByUser: {}, issuedNumbers: [], verificationRequests: [], verifierOverrides: {} })
+);
+
 function loadDb(): KampusIdDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && parsed.identitiesByUser) {
-        return {
-          identitiesByUser: parsed.identitiesByUser || {},
-          issuedNumbers: parsed.issuedNumbers || [],
-          verificationRequests: parsed.verificationRequests || [],
-          verifierOverrides: parsed.verifierOverrides || {},
-        };
-      }
-    }
-  } catch {
-    // recreate cleanly
-  }
-  const initial: KampusIdDatabase = {
-    identitiesByUser: {},
-    issuedNumbers: [],
-    verificationRequests: [],
-    verifierOverrides: {},
-  };
-  saveDb(initial);
-  return initial;
+  return kampusIdStorage.get();
 }
 
-function saveDb(db: KampusIdDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist KAMPUS ID DB:', err);
-  }
+function saveDb(db: KampusIdDatabase): void {
+  kampusIdStorage.saveSync(db);
 }
 
 function generateUniqueKampusId(db: KampusIdDatabase): string {

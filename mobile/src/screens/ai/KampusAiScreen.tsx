@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -23,6 +23,7 @@ import {
   Brain,
 } from 'lucide-react-native';
 import { useTheme } from '../../theme/ThemeContext';
+import API_BASE_URL from '../../config/api';
 import { Spacing, BorderRadius, Typography, Shadows } from '../../theme/tokens';
 
 interface ChatMessage {
@@ -73,7 +74,7 @@ export const KampusAiScreen = () => {
 
     try {
       // Call backend Gemini AI endpoint
-      const res = await fetch('http://localhost:3000/api/ai/chat', {
+      const res = await fetch(`${API_BASE_URL}/api/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -100,7 +101,7 @@ export const KampusAiScreen = () => {
       const fallbackMsg: ChatMessage = {
         id: 'ai_' + Date.now(),
         sender: 'ai',
-        text: `**Academic Concept Breakdown:**\n\n• **Core Idea**: High-efficiency approach for solving "${query.trim()}".\n• **Key Takeaways**: Ensure boundary conditions are handled and state variables are validated.\n• **Recommended Reading**: Chapter 4 of Core Course Materials in Study Hub.`,
+        text: `**Academic Concept Breakdown:**\n\nâ€¢ **Core Idea**: High-efficiency approach for solving "${query.trim()}".\nâ€¢ **Key Takeaways**: Ensure boundary conditions are handled and state variables are validated.\nâ€¢ **Recommended Reading**: Chapter 4 of Core Course Materials in Study Hub.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, fallbackMsg]);
@@ -123,7 +124,7 @@ export const KampusAiScreen = () => {
           <View>
             <Text style={[styles.headerTitle, { color: colors.text }]}>KAMPUS AI</Text>
             <Text style={[styles.headerSubtitle, { color: colors.success }]}>
-              ● Academic Copilot Active (Gemini Engine)
+              â— Academic Copilot Active (Gemini Engine)
             </Text>
           </View>
         </View>
@@ -448,3 +449,4 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
 });
+

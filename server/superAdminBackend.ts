@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { ModuleStorage } from '../database/moduleStorage.ts';
+import { query, isDatabaseConnected } from '../database/db.ts';
 import type {
   AcademicCourseRecord,
   AcademicResourceRecord,
@@ -1135,32 +1137,18 @@ function createInitialDb(): SuperAdminDatabase {
   };
 }
 
+const superAdminStorage = new ModuleStorage<SuperAdminDatabase>(
+  'super_admin',
+  DB_PATH,
+  () => createInitialDb()
+);
+
 function loadDb(): SuperAdminDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')) as Partial<SuperAdminDatabase>;
-      const fallback = createInitialDb();
-      return {
-        ...fallback,
-        ...raw,
-        websiteConfig: { ...fallback.websiteConfig, ...(raw.websiteConfig || {}) },
-        navigation: { ...fallback.navigation, ...(raw.navigation || {}) },
-        communityRules: { ...fallback.communityRules, ...(raw.communityRules || {}) },
-        marketRules: { ...fallback.marketRules, ...(raw.marketRules || {}) },
-        notificationPolicies: { ...fallback.notificationPolicies, ...(raw.notificationPolicies || {}) },
-        retentionConfig: { ...fallback.retentionConfig, ...(raw.retentionConfig || {}) },
-      };
-    }
-  } catch {
-    // rebuild clean database if corrupted
-  }
-  const initial = createInitialDb();
-  writeJsonSafe(DB_PATH, initial);
-  return initial;
+  return superAdminStorage.get();
 }
 
 function saveDb(db: SuperAdminDatabase): void {
-  writeJsonSafe(DB_PATH, db);
+  superAdminStorage.saveSync(db);
 }
 
 function appendAudit(
@@ -1841,15 +1829,48 @@ export function registerSuperAdminBackend(app: Express): void {
   // =========================================================
   // ADMIN AUTHENTICATION & SESSIONS
   // =========================================================
-  app.post('/api/admin/auth/login', (req: Request, res: Response) => {
+  app.post('/api/admin/auth/login', async (req: Request, res: Response) => {
     const db = loadDb();
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
     const ua = String(req.header('user-agent') || 'Unknown Browser');
     const ip = String(req.ip || req.socket.remoteAddress || '127.0.0.1');
 
-    const member = db.teamMembers.find((m) => m.email.toLowerCase() === email);
-    const cred = member ? db.credentials.find((c) => c.adminId === member.id) : null;
+    let member: AdminTeamMember | undefined = db.teamMembers.find((m) => m.email.toLowerCase() === email);
+    let cred = member ? db.credentials.find((c) => c.adminId === member!.id) : null;
+
+    // Verify against PostgreSQL admin_users table with real credentials
+    if (isDatabaseConnected()) {
+      try {
+        const pgAdmin = await query(
+          'SELECT id, email, name, password_hash, password_salt, role_id, status FROM admin_users WHERE email = $1',
+          [email]
+        );
+        if (pgAdmin.rows.length > 0) {
+          const row = pgAdmin.rows[0];
+          if (!member) {
+            member = {
+              id: row.id,
+              email: row.email,
+              name: row.name,
+              roleId: row.role_id,
+              status: row.status,
+              createdAt: new Date().toISOString(),
+              lastLoginAt: null,
+            };
+          }
+          if (row.password_hash && row.password_salt) {
+            cred = {
+              adminId: row.id,
+              passwordHash: row.password_hash,
+              passwordSalt: row.password_salt,
+            };
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Admin DB Check Notice]:', err.message);
+      }
+    }
 
     if (!member || !cred || !verifyPassword(password, cred.passwordSalt, cred.passwordHash)) {
       db.loginEvents.unshift({

@@ -148,7 +148,9 @@ const AppLayout: React.FC = () => {
   const isAdminRoute = location.pathname.startsWith('/admin');
   const isAuthRoute = [
     '/login',
+    '/sign-in',
     '/register',
+    '/sign-up',
     '/verify-email',
     '/forgot-password',
     '/reset-password',
@@ -239,7 +241,9 @@ const AppLayout: React.FC = () => {
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/sign-in" element={<Navigate to="/login" replace />} />
             <Route path="/register" element={<RegisterPage />} />
+            <Route path="/sign-up" element={<Navigate to="/register" replace />} />
             <Route path="/verify-email" element={<VerifyEmailPage />} />
             <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/reset-password" element={<ResetPasswordPage />} />

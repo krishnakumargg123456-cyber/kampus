@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -29,7 +29,7 @@ import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
 
 export const RegisterScreen = ({ navigation }: any) => {
   const { colors } = useTheme();
-  const { sendEmailOtp, registerStudent } = useAuth();
+  const { sendEmailOtp, verifyRegistrationOtp, registerStudent } = useAuth();
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -54,6 +54,8 @@ export const RegisterScreen = ({ navigation }: any) => {
   // Step 4: OTP Verification
   const [otpCode, setOtpCode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
+  const [verificationToken, setVerificationToken] = useState('');
+  const actionLock = useRef(false);
 
   // Step 5: Interests & Skills
   const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
@@ -96,67 +98,117 @@ export const RegisterScreen = ({ navigation }: any) => {
   };
 
   const handleNextStep = async () => {
+    if (actionLock.current || loading) return;
     setErrorMessage('');
 
     if (step === 1) {
       if (!fullName.trim() || !email.trim() || !email.includes('@')) {
-        setErrorMessage('Please provide your full legal name and college email.');
+        setErrorMessage('Please provide your full legal name and valid email.');
         return;
       }
       setStep(2);
-    } else if (step === 2) {
+      return;
+    }
+
+    if (step === 2) {
       if (!college.trim() || !course.trim()) {
         setErrorMessage('Please fill in your college and course details.');
         return;
       }
       setStep(3);
-    } else if (step === 3) {
+      return;
+    }
+
+    if (step === 3) {
       if (password.length < 6) {
         setErrorMessage('Password must be at least 6 characters long.');
         return;
       }
       if (password !== confirmPassword) {
-        setErrorMessage('Passwords do not match. Please verify.');
+        setErrorMessage('Passwords do not match.');
         return;
       }
 
-      // Trigger OTP dispatch for Step 4
+      actionLock.current = true;
       setLoading(true);
-      const res = await sendEmailOtp(email.trim(), 'register');
-      setLoading(false);
-      if (res.success) {
-        setOtpSent(true);
+      try {
+        const res = await sendEmailOtp(email.trim().toLowerCase(), 'register');
+        if (res.success) {
+          setOtpSent(true);
+          setOtpCode('');
+          setVerificationToken('');
+          setStep(4);
+        } else {
+          setErrorMessage(res.error || 'Failed to send OTP.');
+        }
+      } catch (e) {
+        setErrorMessage('Could not send OTP. Please try again.');
+      } finally {
+        setLoading(false);
+        actionLock.current = false;
+      }
+      return;
+    }
+
+    if (step === 4) {
+      if (!/^\\d{6}$/.test(otpCode)) {
+        setErrorMessage('Enter the complete 6-digit OTP.');
+        return;
+      }
+
+      actionLock.current = true;
+      setLoading(true);
+      try {
+        const res = await verifyRegistrationOtp(email.trim().toLowerCase(), otpCode);
+        if (res.success && res.verificationToken) {
+          setVerificationToken(res.verificationToken);
+          setStep(5);
+        } else {
+          setErrorMessage(res.error || 'OTP verification failed.');
+        }
+      } catch (e) {
+        setErrorMessage('OTP verification failed. Please retry.');
+      } finally {
+        setLoading(false);
+        actionLock.current = false;
+      }
+      return;
+    }
+
+    if (step === 5) {
+      if (!verificationToken) {
+        setErrorMessage('Verify your email before registration.');
         setStep(4);
-      } else {
-        setErrorMessage(res.error || 'Failed to dispatch verification code.');
-      }
-    } else if (step === 4) {
-      if (otpCode.length < 6) {
-        setErrorMessage('Please enter the 6-digit code sent to your email.');
         return;
       }
-      setStep(5);
-    } else if (step === 5) {
-      // Final submission
-      setLoading(true);
-      const payload = {
-        fullName: fullName.trim(),
-        email: email.trim().toLowerCase(),
-        mobile: mobile.trim(),
-        college: college.trim(),
-        course: course.trim(),
-        branch: branch.trim(),
-        semester: semester.trim(),
-        enrollmentNo: enrollmentNo.trim(),
-        password,
-        interests: selectedInterests,
-        skills: selectedSkills,
-      };
 
-      const res = await registerStudent(payload);
-      setLoading(false);
-      if (!res.success) {
-        setErrorMessage(res.error || 'Failed to complete registration.');
+      actionLock.current = true;
+      setLoading(true);
+      try {
+        const payload = {
+          fullName: fullName.trim(),
+          email: email.trim().toLowerCase(),
+          mobile: mobile.trim(),
+          college: college.trim(),
+          course: course.trim(),
+          branch: branch.trim(),
+          semester: semester.trim(),
+          enrollmentNo: enrollmentNo.trim(),
+          password,
+          interests: selectedInterests,
+          skills: selectedSkills,
+          verificationToken,
+        };
+
+        const res = await registerStudent(payload);
+        if (!res.success) {
+          setErrorMessage(res.error || 'Registration failed.');
+        }
+      } catch (e) {
+        setErrorMessage('Registration failed. Please try again.');
+      } finally {
+        setLoading(false);
+        actionLock.current = false;
       }
     }
   };
@@ -227,7 +279,7 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. rahul@iitb.ac.in"
                 placeholderTextColor={colors.textMuted}
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(value) => { setEmail(value); setOtpCode(''); setVerificationToken(''); setOtpSent(false); }}
                 keyboardType="email-address"
                 autoCapitalize="none"
               />

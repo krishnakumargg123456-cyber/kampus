@@ -3,6 +3,18 @@
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- 0. Module State Storage (Versioned JSONB State for High-Integrity Module Backends)
+CREATE TABLE IF NOT EXISTS module_state (
+    module_key VARCHAR(128) PRIMARY KEY,
+    state JSONB NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    checksum VARCHAR(64) NOT NULL,
+    record_count INT DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_module_state_updated ON module_state(updated_at);
+
 -- 1. Users and Authentication
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(64) PRIMARY KEY,
@@ -61,6 +73,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     email VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    password_salt VARCHAR(128),
     role_id VARCHAR(64) REFERENCES admin_roles(id),
     status VARCHAR(32) DEFAULT 'Active', -- 'Active', 'Suspended'
     last_login_at TIMESTAMP WITH TIME ZONE,
@@ -374,3 +387,20 @@ CREATE TABLE IF NOT EXISTS notifications (
     action_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Schema Migrations & Alterations for Existing Databases
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS password_salt VARCHAR(128);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile VARCHAR(50);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS module_state (
+    module_key VARCHAR(128) PRIMARY KEY,
+    state JSONB NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    checksum VARCHAR(64) NOT NULL,
+    record_count INT DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_module_state_updated ON module_state(updated_at);
+

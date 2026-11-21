@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -117,32 +118,19 @@ const INITIAL_FALLBACK_STATE: NotesExchangeState = {
   reportedNoteIds: [],
 };
 
+
+const notesExchangeStorage = new ModuleStorage<NotesExchangeState>(
+  'notes_exchange',
+  DB_PATH,
+  () => (INITIAL_FALLBACK_STATE)
+);
+
 function loadDb(): NotesExchangeState {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-      if (data && Array.isArray(data.notes) && data.notes.length > 0) {
-        return {
-          ...INITIAL_FALLBACK_STATE,
-          ...data,
-          notes: data.notes?.length ? data.notes : INITIAL_FALLBACK_STATE.notes,
-          requests: data.requests?.length ? data.requests : INITIAL_FALLBACK_STATE.requests,
-        };
-      }
-    }
-  } catch (err) {
-    console.error('[NotesExchangeDB Load Error]:', err);
-  }
-  saveDb(INITIAL_FALLBACK_STATE);
-  return INITIAL_FALLBACK_STATE;
+  return notesExchangeStorage.get();
 }
 
 function saveDb(db: NotesExchangeState): void {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[NotesExchangeDB Save Error]:', err);
-  }
+  notesExchangeStorage.saveSync(db);
 }
 
 export function registerNotesExchangeBackend(app: Express): void {

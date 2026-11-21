@@ -13,3 +13,21 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Local backups
+*.backup
+*.backup-*
+mobile/assets/backup/
+
+# Local KAMPUS data
+.kampus_*_db.json
+.kampus_backups/
+
+# Local backups and generated files
+.kampus_project_backups/
+.kampus_backups/
+mobile/assets_backup_*/
+kampus_icon_temp/
+.env
+.env.*
+!.env.example

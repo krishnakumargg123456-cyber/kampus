@@ -6,7 +6,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import JSZip from 'jszip';
 import { GoogleGenAI, Type, type Part } from '@google/genai';
-import { initializeDatabase } from './database/db.ts';
+import { initializeDatabase, getDatabaseStatus, query } from './database/db.ts';
+import { initializeAllModules } from './database/moduleStorage.ts';
 import { registerAuthBackend } from './server/authBackend.ts';
 import { registerChatBackend } from './server/chatBackend.ts';
 import { registerStudyRoomsBackend } from './server/studyRoomsBackend.ts';
@@ -173,6 +174,9 @@ async function startServer() {
   registerCommunityBackend(app);
   registerNotesExchangeBackend(app);
   registerStudyPartnerBackend(app);
+
+  // Initialize and synchronize all 21 module stores from PostgreSQL module_state
+  await initializeAllModules();
 
   httpServer.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url || '/', 'http://localhost');
@@ -933,13 +937,37 @@ Use valid YYYY-MM-DD dates anchored to Today's Date (${payload.todayISO}), HH:MM
     }
   });
 
-  // System Health & Unknown API Fallback
-  app.get('/api/health', (_req, res) => {
+  // System Health & Database Readiness Verification (Zero secret exposure)
+  app.get('/api/health', async (_req, res) => {
+    const dbStatus = getDatabaseStatus();
+    let tablesChecked = 0;
+    let schemaReady = false;
+
+    if (dbStatus.isPostgresConnected) {
+      try {
+        const checkRes = await query(
+          `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'`
+        );
+        tablesChecked = parseInt(checkRes.rows[0].count, 10);
+        schemaReady = tablesChecked >= 20;
+      } catch {
+        schemaReady = false;
+      }
+    }
+
     res.json({
       ok: true,
-      service: 'kampus',
+      service: 'kampus-api',
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
+      database: {
+        engine: dbStatus.engine,
+        connected: dbStatus.isPostgresConnected,
+        poolActive: dbStatus.poolActive,
+        environment: dbStatus.environment,
+        schemaReady: dbStatus.isPostgresConnected ? schemaReady : true,
+        tablesCount: tablesChecked,
+      },
     });
   });
 

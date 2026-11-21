@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -700,41 +701,19 @@ function createSeedDatabase(): SkillSwapDatabase {
   };
 }
 
+
+const skillswapStorage = new ModuleStorage<SkillSwapDatabase>(
+  'skillswap',
+  DB_FILE,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): SkillSwapDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.profiles) && Array.isArray(parsed.listings)) {
-        return {
-          categories: Array.isArray(parsed.categories) && parsed.categories.length > 0
-            ? parsed.categories
-            : SEEDED_CATEGORIES,
-          profiles: parsed.profiles,
-          listings: parsed.listings,
-          requests: parsed.requests || [],
-          exchanges: parsed.exchanges || [],
-          reviews: parsed.reviews || [],
-          savedByUser: parsed.savedByUser || {},
-          blockedByUser: parsed.blockedByUser || {},
-          reports: parsed.reports || [],
-          files: parsed.files || {},
-        };
-      }
-    }
-  } catch {
-    // recreate cleanly
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return skillswapStorage.get();
 }
 
-function saveDb(db: SkillSwapDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist SkillSwap DB:', err);
-  }
+function saveDb(db: SkillSwapDatabase): void {
+  skillswapStorage.saveSync(db);
 }
 
 function ensureUserProfile(

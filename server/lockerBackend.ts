@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -167,35 +168,19 @@ async function extractSearchableText(buffer: Buffer, ext: string): Promise<strin
   return undefined;
 }
 
+
+const lockerStorage = new ModuleStorage<LockerDatabase>(
+  'locker',
+  DB_PATH,
+  () => ({ documents: [], folders: [], reminders: [], activity: [], recentSearchesByUser: {}, admissionDocAttachments: {} })
+);
+
 function loadDb(): LockerDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf8');
-      const parsed = JSON.parse(raw) as LockerDatabase;
-      return {
-        documents: parsed.documents || [],
-        folders: parsed.folders || [],
-        reminders: parsed.reminders || [],
-        activity: parsed.activity || [],
-        recentSearchesByUser: parsed.recentSearchesByUser || {},
-        admissionDocAttachments: parsed.admissionDocAttachments || {},
-      };
-    }
-  } catch {
-    // rebuild clean empty vault state
-  }
-  return {
-    documents: [],
-    folders: [],
-    reminders: [],
-    activity: [],
-    recentSearchesByUser: {},
-    admissionDocAttachments: {},
-  };
+  return lockerStorage.get();
 }
 
 function saveDb(db: LockerDatabase): void {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  lockerStorage.saveSync(db);
 }
 
 function recordActivity(

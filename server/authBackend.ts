@@ -6,7 +6,8 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import { createClerkClient, verifyToken } from '@clerk/backend';
-import { query } from '../database/db.ts';
+import { query, isDatabaseConnected } from '../database/db.ts';
+import { getRegisteredModule, ModuleStorage } from '../database/moduleStorage.ts';
 
 const JWT_SECRET = process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET environment variable is required.'); })();
 const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || '';
@@ -75,15 +76,17 @@ async function sendEmailOtp(toEmail: string, otpCode: string, purpose: string): 
       console.log(`[KAMPUS SMTP] Verification email dispatched successfully to: ${toEmail}`);
       return true;
     } catch (err: any) {
-      console.warn(`[KAMPUS SMTP Warning]: Failed to dispatch via SMTP: ${err.message}. Displaying code in security console.`);
+      console.error(`[KAMPUS SMTP Error]: Failed to dispatch via SMTP to ${toEmail}:`, err.message);
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(`Email dispatch failed via SMTP gateway: ${err.message}`);
+      }
     }
   }
 
   // Fallback logging for local testing & development without live SMTP gateway
-  console.log('====================================================');
-  console.log(`[KAMPUS REAL EMAIL OTP] To: ${toEmail} | Purpose: ${purpose}`);
-  console.log(`>>> VERIFICATION CODE: [ ${otpCode} ] <<<`);
-  console.log('====================================================');
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[KAMPUS DEV OTP] To: ${toEmail} | Purpose: ${purpose} | Code: [${otpCode}]`);
+  }
   return true;
 }
 
@@ -91,23 +94,19 @@ function hashString(val: string): string {
   return crypto.createHash('sha256').update(val).digest('hex');
 }
 
+const accountStorage = getRegisteredModule('account') || new ModuleStorage<any>(
+  'account',
+  ACCOUNT_DB_PATH,
+  () => ({ profiles: {}, settings: {}, credentials: {} })
+);
+
 function getAccountDb(): any {
-  try {
-    if (fs.existsSync(ACCOUNT_DB_PATH)) {
-      return JSON.parse(fs.readFileSync(ACCOUNT_DB_PATH, 'utf8'));
-    }
-  } catch (err) {
-    // fallback
-  }
-  return { profiles: {}, settings: {}, credentials: {} };
+  return accountStorage.get();
 }
 
-function saveAccountDb(db: any): void {
-  try {
-    fs.writeFileSync(ACCOUNT_DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[AccountDB Save Error]:', err);
-  }
+function saveAccountDb(db: any): boolean {
+  accountStorage.saveSync(db);
+  return true;
 }
 
 export function registerAuthBackend(app: Express): void {
@@ -155,8 +154,9 @@ export function registerAuthBackend(app: Express): void {
         rateLimitMap.set(normalizedEmail, { count: 1, firstAttempt: now });
       }
 
-      // Check cooldown (60 seconds)
-      const existing = otpStore.get(normalizedEmail);
+      // Check cooldown (60 seconds) per email + purpose
+      const otpKey = `${normalizedEmail}:${purpose}`;
+      const existing = otpStore.get(otpKey);
       if (existing && now - existing.lastSentAt < 60 * 1000) {
         const remainingSec = Math.ceil((60 * 1000 - (now - existing.lastSentAt)) / 1000);
         res.status(429).json({
@@ -167,11 +167,11 @@ export function registerAuthBackend(app: Express): void {
       }
 
       // Generate 6-digit cryptographic OTP
-      const otpCode = crypto.randomInt(100000, 999999).toString();
+      const otpCode = crypto.randomInt(100000, 1000000).toString();
       const codeHash = hashString(otpCode);
       const expiresAt = now + 10 * 60 * 1000; // 10 minutes
 
-      otpStore.set(normalizedEmail, {
+      otpStore.set(otpKey, {
         email: normalizedEmail,
         codeHash,
         purpose,
@@ -179,6 +179,19 @@ export function registerAuthBackend(app: Express): void {
         expiresAt,
         lastSentAt: now,
       });
+
+      if (isDatabaseConnected()) {
+        try {
+          const expiresDate = new Date(expiresAt);
+          await query(
+            `INSERT INTO otp_tokens (email, identifier, code_hash, token_hash, purpose, expires_at, attempts)
+             VALUES ($1, $1, $2, $2, $3, $4, 0)`,
+            [normalizedEmail, codeHash, purpose, expiresDate.toISOString()]
+          );
+        } catch (dbErr: any) {
+          console.warn('[OTP DB Save Notice]:', dbErr.message);
+        }
+      }
 
       await sendEmailOtp(normalizedEmail, otpCode, purpose.replace('_', ' '));
 
@@ -206,46 +219,88 @@ export function registerAuthBackend(app: Express): void {
       }
 
       const normalizedEmail = email.trim().toLowerCase();
-      const stored = otpStore.get(normalizedEmail);
+      let isValidOtp = false;
 
-      if (!stored) {
-        res.status(400).json({ success: false, error: 'No OTP requested for this email or it has expired.' });
-        return;
+      // Check PostgreSQL persistent OTP storage
+      if (isDatabaseConnected()) {
+        try {
+          const otpRes = await query(
+            `SELECT id, code_hash, token_hash, purpose, expires_at, attempts
+             FROM otp_tokens
+             WHERE (email = $1 OR identifier = $1) AND purpose = $2
+             ORDER BY created_at DESC LIMIT 1`,
+            [normalizedEmail, purpose]
+          );
+          if (otpRes.rows.length > 0) {
+            const row = otpRes.rows[0];
+            if (new Date() > new Date(row.expires_at)) {
+              res.status(400).json({ success: false, error: 'Verification code has expired. Please request a new one.' });
+              return;
+            }
+            if (row.attempts >= 5) {
+              res.status(429).json({ success: false, error: 'Too many invalid attempts. Please request a new code.' });
+              return;
+            }
+            const inputHash = hashString(code.trim());
+            const storedHash = row.code_hash || row.token_hash;
+            if (inputHash !== storedHash) {
+              await query('UPDATE otp_tokens SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+              const remaining = 5 - (row.attempts + 1);
+              res.status(400).json({
+                success: false,
+                error: `Incorrect verification code. ${remaining} attempts remaining.`,
+              });
+              return;
+            }
+            isValidOtp = true;
+            await query('DELETE FROM otp_tokens WHERE (email = $1 OR identifier = $1) AND purpose = $2', [normalizedEmail, purpose]);
+          }
+        } catch (dbErr: any) {
+          console.warn('[OTP DB Verify Notice]:', dbErr.message);
+        }
       }
 
-      if (stored.purpose !== purpose) {
-        res.status(400).json({
-          success: false,
-          error: 'Verification code purpose mismatch.',
-        });
-        return;
-      }
+      if (!isValidOtp) {
+        const otpKey = `${normalizedEmail}:${purpose}`;
+        const stored = otpStore.get(otpKey);
+        if (!stored) {
+          res.status(400).json({ success: false, error: 'No OTP requested for this email or it has expired.' });
+          return;
+        }
 
-      if (Date.now() > stored.expiresAt) {
-        otpStore.delete(normalizedEmail);
-        res.status(400).json({ success: false, error: 'Verification code has expired. Please request a new one.' });
-        return;
-      }
+        if (stored.purpose !== purpose) {
+          res.status(400).json({
+            success: false,
+            error: 'Verification code purpose mismatch.',
+          });
+          return;
+        }
 
-      if (stored.attempts >= 5) {
-        otpStore.delete(normalizedEmail);
-        res.status(429).json({ success: false, error: 'Too many invalid attempts. Please request a new code.' });
-        return;
-      }
+        if (Date.now() > stored.expiresAt) {
+          otpStore.delete(otpKey);
+          res.status(400).json({ success: false, error: 'Verification code has expired. Please request a new one.' });
+          return;
+        }
 
-      const inputHash = hashString(code.trim());
-      if (inputHash !== stored.codeHash) {
-        stored.attempts += 1;
-        const remaining = 5 - stored.attempts;
-        res.status(400).json({
-          success: false,
-          error: `Incorrect verification code. ${remaining} attempts remaining.`,
-        });
-        return;
-      }
+        if (stored.attempts >= 5) {
+          otpStore.delete(otpKey);
+          res.status(429).json({ success: false, error: 'Too many invalid attempts. Please request a new code.' });
+          return;
+        }
 
-      // Verification successful! Invalidate OTP to prevent replay
-      otpStore.delete(normalizedEmail);
+        const inputHash = hashString(code.trim());
+        if (inputHash !== stored.codeHash) {
+          stored.attempts += 1;
+          const remaining = 5 - stored.attempts;
+          res.status(400).json({
+            success: false,
+            error: `Incorrect verification code. ${remaining} attempts remaining.`,
+          });
+          return;
+        }
+
+        otpStore.delete(otpKey);
+      }
 
       // Handle login flow
       if (purpose === 'login') {
@@ -254,26 +309,91 @@ export function registerAuthBackend(app: Express): void {
           (p) => p.email?.toLowerCase() === normalizedEmail
         );
 
+        // Check PostgreSQL users table
+        if (!userProfile && isDatabaseConnected()) {
+          try {
+            const pgU = await query(
+              'SELECT id, email, name, mobile, college, course, branch, semester, enrollment_no, avatar_url, bio, is_verified FROM users WHERE email = $1',
+              [normalizedEmail]
+            );
+            if (pgU.rows.length > 0) {
+              const r = pgU.rows[0];
+              userProfile = {
+                userId: r.id,
+                fullName: r.name,
+                email: r.email,
+                mobile: r.mobile || '',
+                college: r.college || '',
+                course: r.course || '',
+                branch: r.branch || '',
+                semester: r.semester || '',
+                enrollmentNo: r.enrollment_no || '',
+                avatarUrl: r.avatar_url || '',
+                bio: r.bio || '',
+                isVerified: r.is_verified,
+                hasCompletedOnboarding: !!(r.college && r.course),
+                createdAt: new Date().toISOString(),
+              };
+              if (!db.profiles) db.profiles = {};
+              db.profiles[r.id] = userProfile;
+              saveAccountDb(db);
+            }
+          } catch (dbErr: any) {
+            console.warn('[OTP Login DB Profile Query Notice]:', dbErr.message);
+          }
+        }
+
         if (!userProfile) {
-          // Auto-provision verified user for OTP login if not exists
+          // Provision verified user WITHOUT invented fake college or student information
           const userId = 'usr_' + Date.now().toString(36);
           userProfile = {
             userId,
             fullName: normalizedEmail.split('@')[0],
             email: normalizedEmail,
             mobile: '',
-            college: 'Indian Institute of Technology, Bombay',
-            course: 'B.Tech Computer Science',
-            semester: '6',
-            enrollmentNo: '22B0' + Math.floor(1000 + Math.random() * 9000),
+            college: '',
+            course: '',
+            branch: '',
+            semester: '',
+            enrollmentNo: '',
             avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80',
             verifiedBadge: true,
-            hasCompletedOnboarding: true,
+            hasCompletedOnboarding: false, // Prompt onboarding so student enters real university details
             createdAt: new Date().toISOString(),
           };
           if (!db.profiles) db.profiles = {};
           db.profiles[userId] = userProfile;
           saveAccountDb(db);
+
+          if (isDatabaseConnected()) {
+            try {
+              await query(
+                `INSERT INTO users (id, email, name, is_verified)
+                 VALUES ($1, $2, $3, TRUE)
+                 ON CONFLICT (email) DO NOTHING`,
+                [userId, normalizedEmail, userProfile.fullName]
+              );
+            } catch (err: any) {
+              console.warn('[OTP User Insert Notice]:', err.message);
+            }
+          }
+        }
+
+        // Record session in user_sessions
+        if (isDatabaseConnected()) {
+          try {
+            const sessionId = 'sess_' + crypto.randomBytes(16).toString('hex');
+            const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+            const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+            const userAgent = (req.headers['user-agent'] as string) || 'KAMPUS Client';
+            await query(
+              `INSERT INTO user_sessions (id, user_id, device_info, ip_address, expires_at)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [sessionId, userProfile.userId, userAgent, ip, expiresAt.toISOString()]
+            );
+          } catch (sessErr: any) {
+            console.warn('[Session DB Notice]:', sessErr.message);
+          }
         }
 
         const token = jwt.sign(
@@ -373,9 +493,22 @@ export function registerAuthBackend(app: Express): void {
         return;
       }
 
+      // Check duplicate email in PostgreSQL first
+      if (isDatabaseConnected()) {
+        try {
+          const pgDup = await query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
+          if (pgDup.rows.length > 0) {
+            res.status(400).json({ success: false, error: 'An account with this email already exists.' });
+            return;
+          }
+        } catch (dbErr: any) {
+          console.warn('[Register DB Duplicate Check Notice]:', dbErr.message);
+        }
+      }
+
       const db = getAccountDb();
 
-      // Check duplicate email
+      // Check duplicate email in memory/file store
       const existing = Object.values<any>(db.profiles || {}).find(
         (p) => p.email?.toLowerCase() === normalizedEmail
       );
@@ -387,6 +520,39 @@ export function registerAuthBackend(app: Express): void {
       // Hash password using bcrypt
       const passwordHash = await bcrypt.hash(password, 10);
       const userId = 'usr_' + Date.now().toString(36) + '_' + crypto.randomBytes(2).toString('hex');
+
+      // 1. Save to PostgreSQL first (Source of Truth)
+      if (isDatabaseConnected()) {
+        try {
+          await query(
+            `INSERT INTO users (id, email, password_hash, mobile, name, college, course, branch, semester, enrollment_no, is_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+             ON CONFLICT (email) DO NOTHING`,
+            [userId, normalizedEmail, passwordHash, mobile || '', fullName.trim(), college || '', course || '', branch || '', semester || '1', enrollmentNo || '']
+          );
+        } catch (pgInsertErr: any) {
+          console.error('[Register PostgreSQL Insert Error]:', pgInsertErr.message);
+          res.status(500).json({ success: false, error: 'Failed to record student account in database.' });
+          return;
+        }
+      }
+
+      // 2. Record Session in PostgreSQL
+      if (isDatabaseConnected()) {
+        try {
+          const sessionId = 'sess_' + crypto.randomBytes(16).toString('hex');
+          const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+          const userAgent = (req.headers['user-agent'] as string) || 'KAMPUS Client';
+          await query(
+            `INSERT INTO user_sessions (id, user_id, device_info, ip_address, expires_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [sessionId, userId, userAgent, ip, expiresAt.toISOString()]
+          );
+        } catch (sessErr: any) {
+          console.warn('[Register Session DB Notice]:', sessErr.message);
+        }
+      }
 
       const newProfile = {
         userId,
@@ -413,14 +579,6 @@ export function registerAuthBackend(app: Express): void {
       db.profiles[userId] = newProfile;
       db.credentials[userId] = { passwordHash, lastChangedAt: new Date().toISOString() };
       saveAccountDb(db);
-
-      // Save to PostgreSQL if connected
-      await query(
-        `INSERT INTO users (id, email, password_hash, mobile, name, college, course, branch, semester, enrollment_no, is_verified)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
-         ON CONFLICT (id) DO NOTHING`,
-        [userId, normalizedEmail, passwordHash, mobile, fullName, college, course, branch, semester, enrollmentNo]
-      );
 
       const token = jwt.sign(
         { userId, email: normalizedEmail, role: 'student' },
@@ -454,18 +612,50 @@ export function registerAuthBackend(app: Express): void {
       const normalizedEmail = email.trim().toLowerCase();
       const db = getAccountDb();
 
-      const profile = Object.values<any>(db.profiles || {}).find(
+      let profile = Object.values<any>(db.profiles || {}).find(
         (p) => p.email?.toLowerCase() === normalizedEmail
       );
+
+      let effectivePasswordHash = db.credentials?.[profile?.userId]?.passwordHash;
+
+      // Check PostgreSQL users table for credentials if not found in memory
+      if (!effectivePasswordHash && isDatabaseConnected()) {
+        try {
+          const pgUser = await query(
+            'SELECT id, password_hash, name, college, course, branch, semester, enrollment_no, avatar_url, bio, is_verified FROM users WHERE email = $1',
+            [normalizedEmail]
+          );
+          if (pgUser.rows.length > 0 && pgUser.rows[0].password_hash) {
+            effectivePasswordHash = pgUser.rows[0].password_hash;
+            if (!profile) {
+              const u = pgUser.rows[0];
+              profile = {
+                userId: u.id,
+                fullName: u.name,
+                email: normalizedEmail,
+                college: u.college,
+                course: u.course,
+                branch: u.branch,
+                semester: u.semester,
+                enrollmentNo: u.enrollment_no,
+                avatarUrl: u.avatar_url,
+                bio: u.bio,
+                isVerified: u.is_verified,
+                hasCompletedOnboarding: true,
+              };
+            }
+          }
+        } catch (dbErr: any) {
+          console.warn('[DB User Login Notice]:', dbErr.message);
+        }
+      }
 
       if (!profile) {
         res.status(401).json({ success: false, error: 'No student account found with this email.' });
         return;
       }
 
-      const creds = db.credentials?.[profile.userId];
-
-      if (!creds?.passwordHash) {
+      if (!effectivePasswordHash) {
         res.status(401).json({
           success: false,
           error: 'Password credentials not configured. Please reset your password.',
@@ -473,11 +663,28 @@ export function registerAuthBackend(app: Express): void {
         return;
       }
 
-      const isPasswordValid = await bcrypt.compare(password, creds.passwordHash);
+      const isPasswordValid = await bcrypt.compare(password, effectivePasswordHash);
 
       if (!isPasswordValid) {
         res.status(401).json({ success: false, error: 'Invalid password. Please check and try again.' });
         return;
+      }
+
+      // Record active session in PostgreSQL
+      if (isDatabaseConnected()) {
+        try {
+          const sessionId = 'sess_' + crypto.randomBytes(16).toString('hex');
+          const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+          const userAgent = (req.headers['user-agent'] as string) || 'KAMPUS Client';
+          await query(
+            `INSERT INTO user_sessions (id, user_id, device_info, ip_address, expires_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [sessionId, profile.userId, userAgent, ip, expiresAt.toISOString()]
+          );
+        } catch (sessErr: any) {
+          console.warn('[Session DB Notice]:', sessErr.message);
+        }
       }
 
       const token = jwt.sign(
@@ -511,7 +718,7 @@ export function registerAuthBackend(app: Express): void {
 
       const normalizedEmail = email.trim().toLowerCase();
       const db = getAccountDb();
-      const profile = Object.values<any>(db.profiles || {}).find(
+      let profile = Object.values<any>(db.profiles || {}).find(
         (p) => p.email?.toLowerCase() === normalizedEmail
       );
 
@@ -524,15 +731,31 @@ export function registerAuthBackend(app: Express): void {
         return;
       }
 
-      const otpCode = crypto.randomInt(100000, 999999).toString();
-      otpStore.set(normalizedEmail, {
+      const otpCode = crypto.randomInt(100000, 1000000).toString();
+      const codeHash = hashString(otpCode);
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+
+      otpStore.set(`${normalizedEmail}:forgot_password`, {
         email: normalizedEmail,
-        codeHash: hashString(otpCode),
+        codeHash,
         purpose: 'forgot_password',
         attempts: 0,
-        expiresAt: Date.now() + 10 * 60 * 1000,
+        expiresAt,
         lastSentAt: Date.now(),
       });
+
+      if (isDatabaseConnected()) {
+        try {
+          const expiresDate = new Date(expiresAt);
+          await query(
+            `INSERT INTO otp_tokens (identifier, token_hash, purpose, expires_at, attempts)
+             VALUES ($1, $2, 'forgot_password', $3, 0)`,
+            [normalizedEmail, codeHash, expiresDate.toISOString()]
+          );
+        } catch (dbErr: any) {
+          console.warn('[Forgot Password OTP DB Save Notice]:', dbErr.message);
+        }
+      }
 
       await sendEmailOtp(normalizedEmail, otpCode, 'Password Reset');
 
@@ -560,45 +783,99 @@ export function registerAuthBackend(app: Express): void {
       }
 
       const normalizedEmail = email.trim().toLowerCase();
-      const stored = otpStore.get(normalizedEmail);
+      let isValidResetCode = false;
 
-      if (!stored || stored.purpose !== 'forgot_password') {
-        res.status(400).json({ success: false, error: 'Invalid or expired reset code.' });
-        return;
+      // Check PostgreSQL persistent OTP tokens for forgot_password
+      if (isDatabaseConnected()) {
+        try {
+          const otpRes = await query(
+            `SELECT id, token_hash, expires_at, attempts
+             FROM otp_tokens
+             WHERE identifier = $1 AND purpose = 'forgot_password'
+             ORDER BY created_at DESC LIMIT 1`,
+            [normalizedEmail]
+          );
+          if (otpRes.rows.length > 0) {
+            const row = otpRes.rows[0];
+            if (new Date() > new Date(row.expires_at)) {
+              res.status(400).json({ success: false, error: 'Reset code expired. Request a new code.' });
+              return;
+            }
+            if (row.attempts >= 5) {
+              res.status(429).json({ success: false, error: 'Too many attempts. Request a new code.' });
+              return;
+            }
+            const inputHash = hashString(code.trim());
+            if (inputHash !== row.token_hash) {
+              await query('UPDATE otp_tokens SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+              res.status(400).json({ success: false, error: 'Invalid reset code.' });
+              return;
+            }
+            isValidResetCode = true;
+            await query("DELETE FROM otp_tokens WHERE identifier = $1 AND purpose = 'forgot_password'", [normalizedEmail]);
+          }
+        } catch (dbErr: any) {
+          console.warn('[Reset Password DB Check Notice]:', dbErr.message);
+        }
       }
 
-      if (Date.now() > stored.expiresAt) {
+      if (!isValidResetCode) {
+        const otpKey = `${normalizedEmail}:forgot_password`;
+        const stored = otpStore.get(otpKey) || otpStore.get(normalizedEmail);
+
+        if (!stored || (stored.purpose !== 'forgot_password' && stored.purpose !== undefined)) {
+          res.status(400).json({ success: false, error: 'Invalid or expired reset code.' });
+          return;
+        }
+
+        if (Date.now() > stored.expiresAt) {
+          otpStore.delete(otpKey);
+          otpStore.delete(normalizedEmail);
+          res.status(400).json({ success: false, error: 'Reset code expired. Request a new code.' });
+          return;
+        }
+
+        if (stored.attempts >= 5) {
+          otpStore.delete(otpKey);
+          otpStore.delete(normalizedEmail);
+          res.status(429).json({ success: false, error: 'Too many attempts. Request a new code.' });
+          return;
+        }
+
+        if (hashString(code.trim()) !== stored.codeHash) {
+          stored.attempts += 1;
+          res.status(400).json({ success: false, error: 'Invalid reset code.' });
+          return;
+        }
+
+        otpStore.delete(otpKey);
         otpStore.delete(normalizedEmail);
-        res.status(400).json({ success: false, error: 'Reset code expired. Request a new code.' });
-        return;
-      }
-
-      if (stored.attempts >= 5) {
-        otpStore.delete(normalizedEmail);
-        res.status(429).json({ success: false, error: 'Too many attempts. Request a new code.' });
-        return;
-      }
-
-      if (hashString(code.trim()) !== stored.codeHash) {
-        stored.attempts += 1;
-        res.status(400).json({ success: false, error: 'Invalid reset code.' });
-        return;
       }
 
       const db = getAccountDb();
-      const profile = Object.values<any>(db.profiles || {}).find(
+      let profile = Object.values<any>(db.profiles || {}).find(
         (p) => p.email?.toLowerCase() === normalizedEmail
       );
 
-      if (!profile) {
-        res.status(404).json({ success: false, error: 'User not found.' });
-        return;
+      const passwordHash = await bcrypt.hash(newPassword, 10);
+
+      // Synchronize to PostgreSQL users table as primary source of truth
+      if (isDatabaseConnected()) {
+        try {
+          await query(
+            'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE email = $2',
+            [passwordHash, normalizedEmail]
+          );
+        } catch (pgErr: any) {
+          console.warn('[Reset Password DB Notice]:', pgErr.message);
+        }
       }
 
-      const passwordHash = await bcrypt.hash(newPassword, 10);
-      if (!db.credentials) db.credentials = {};
-      db.credentials[profile.userId] = { passwordHash, lastChangedAt: new Date().toISOString() };
-      saveAccountDb(db);
+      if (profile) {
+        if (!db.credentials) db.credentials = {};
+        db.credentials[profile.userId] = { passwordHash, lastChangedAt: new Date().toISOString() };
+        saveAccountDb(db);
+      }
 
       res.json({ success: true, message: 'Password has been reset successfully. You can now login.' });
     } catch (err: any) {
@@ -691,7 +968,7 @@ export function registerAuthBackend(app: Express): void {
             };
             if (!db.profiles) db.profiles = {};
             db.profiles[userProfile.userId] = userProfile;
-            saveAccountDb(db);
+            if (!saveAccountDb(db)) { throw new Error('Account database write failed.'); }
           }
         } catch (fetchErr) {
           console.warn('[Clerk Auto-fetch Warning]:', fetchErr);
@@ -784,7 +1061,7 @@ export function registerAuthBackend(app: Express): void {
 
         existingProfile.updatedAt = new Date().toISOString();
         db.profiles[existingKey] = existingProfile;
-        saveAccountDb(db);
+        if (!saveAccountDb(db)) { throw new Error('Account database write failed.'); }
 
         const token = jwt.sign(
           { userId: existingProfile.userId, clerkId, email: existingProfile.email, role: 'student' },
@@ -826,7 +1103,7 @@ export function registerAuthBackend(app: Express): void {
       };
 
       db.profiles[userId] = newProfile;
-      saveAccountDb(db);
+      if (!saveAccountDb(db)) { throw new Error('Account database write failed.'); }
 
       // Persist to PostgreSQL if connected
       await query(
@@ -929,7 +1206,7 @@ export function registerAuthBackend(app: Express): void {
       };
 
       db.profiles[targetKey] = updated;
-      saveAccountDb(db);
+      if (!saveAccountDb(db)) { throw new Error('Account database write failed.'); }
 
       await query(
         `UPDATE users SET college = $1, course = $2, semester = $3, enrollment_no = $4 WHERE id = $5`,
@@ -968,4 +1245,5 @@ export function registerAuthBackend(app: Express): void {
     });
   });
 }
+
 

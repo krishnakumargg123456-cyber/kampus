@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -158,32 +159,19 @@ const INITIAL_FALLBACK_STATE: CommunityState = {
   },
 };
 
+
+const communityStorage = new ModuleStorage<CommunityState>(
+  'community',
+  DB_PATH,
+  () => (INITIAL_FALLBACK_STATE)
+);
+
 function loadDb(): CommunityState {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-      if (data && Array.isArray(data.posts) && data.posts.length > 0) {
-        return {
-          ...INITIAL_FALLBACK_STATE,
-          ...data,
-          communities: data.communities?.length ? data.communities : INITIAL_FALLBACK_STATE.communities,
-          posts: data.posts?.length ? data.posts : INITIAL_FALLBACK_STATE.posts,
-        };
-      }
-    }
-  } catch (err) {
-    console.error('[CommunityDB Load Error]:', err);
-  }
-  saveDb(INITIAL_FALLBACK_STATE);
-  return INITIAL_FALLBACK_STATE;
+  return communityStorage.get();
 }
 
 function saveDb(db: CommunityState): void {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[CommunityDB Save Error]:', err);
-  }
+  communityStorage.saveSync(db);
 }
 
 export function registerCommunityBackend(app: Express): void {

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   ConnectedServiceItem,
   ConsolidatedActivityItem,
@@ -60,33 +61,18 @@ function createEmptyDb(): AccountDatabase {
   };
 }
 
+const accountStorage = new ModuleStorage<AccountDatabase>(
+  'account',
+  DB_PATH,
+  () => createEmptyDb()
+);
+
 function loadDb(): AccountDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')) as Partial<AccountDatabase>;
-      return {
-        profiles: parsed.profiles || {},
-        settings: parsed.settings || {},
-        sessions: parsed.sessions || [],
-        securityAudit: parsed.securityAudit || [],
-        reports: parsed.reports || [],
-        deletionRequests: parsed.deletionRequests || [],
-        supportTickets: parsed.supportTickets || [],
-        passwordMetaByUser: parsed.passwordMetaByUser || {},
-        disconnectedServicesByUser: parsed.disconnectedServicesByUser || {},
-        modRoleOverrides: parsed.modRoleOverrides || {},
-      };
-    }
-  } catch {
-    // rebuild clean db
-  }
-  const initial = createEmptyDb();
-  saveDb(initial);
-  return initial;
+  return accountStorage.get();
 }
 
 function saveDb(db: AccountDatabase): void {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  accountStorage.saveSync(db);
 }
 
 function safeReadJson<T>(filePath: string): T | null {

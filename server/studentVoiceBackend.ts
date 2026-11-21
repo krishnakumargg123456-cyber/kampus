@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -243,42 +244,19 @@ function createSeedDatabase(): StudentVoiceDatabase {
   };
 }
 
+
+const studentVoiceStorage = new ModuleStorage<StudentVoiceDatabase>(
+  'student_voice',
+  DB_FILE,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): StudentVoiceDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.categories)) {
-        return {
-          categories: parsed.categories || [],
-          submissions: parsed.submissions || [],
-          confidentialIdentities: parsed.confidentialIdentities || {},
-          ideas: parsed.ideas || [],
-          bookmarkedIdeaIdsByUser: parsed.bookmarkedIdeaIdsByUser || {},
-          polls: parsed.polls || [],
-          pollResponses: parsed.pollResponses || [],
-          institutionalUpdates: parsed.institutionalUpdates || [],
-          reports: parsed.reports || [],
-          auditLogs: parsed.auditLogs || [],
-          files: parsed.files || {},
-          roleOverrides: parsed.roleOverrides || {},
-          refCounter: Number(parsed.refCounter) || 1001,
-        };
-      }
-    }
-  } catch {
-    // rebuild cleanly
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return studentVoiceStorage.get();
 }
 
-function saveDb(db: StudentVoiceDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist Student Voice DB:', err);
-  }
+function saveDb(db: StudentVoiceDatabase): void {
+  studentVoiceStorage.saveSync(db);
 }
 
 function validateEvidenceHeader(buffer: Buffer, ext: string): boolean {

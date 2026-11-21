@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   AcademicDeadline,
   CampusAlert,
@@ -949,48 +950,18 @@ function createSeedDatabase(): CampusPulseDatabase {
   };
 }
 
+const campusPulseStorage = new ModuleStorage<CampusPulseDatabase>(
+  'campus_pulse',
+  DB_FILE,
+  () => createSeedDatabase()
+);
+
 function loadDb(): CampusPulseDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.announcements) && Array.isArray(parsed.institutions)) {
-        return {
-          institutions: parsed.institutions,
-          departments: parsed.departments || [],
-          announcements: parsed.announcements,
-          alerts: parsed.alerts || [],
-          deadlines: parsed.deadlines || [],
-          facilities: parsed.facilities || [],
-          lostFound: parsed.lostFound || [],
-          polls: parsed.polls || [],
-          submissions: parsed.submissions || [],
-          reports: parsed.reports || [],
-          publishers: parsed.publishers || [],
-          activeRoleOverrideByUser: parsed.activeRoleOverrideByUser || {},
-          selectedInstitutionByUser: parsed.selectedInstitutionByUser || {},
-          savedNoticesByUser: parsed.savedNoticesByUser || {},
-          savedDeadlinesByUser: parsed.savedDeadlinesByUser || {},
-          followedDeptsByUser: parsed.followedDeptsByUser || {},
-          readingHistoryByUser: parsed.readingHistoryByUser || {},
-          notificationPrefsByUser: parsed.notificationPrefsByUser || {},
-          files: parsed.files || {},
-        };
-      }
-    }
-  } catch {
-    // recreate cleanly
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return campusPulseStorage.get();
 }
 
 function saveDb(db: CampusPulseDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist Campus Pulse DB:', err);
-  }
+  campusPulseStorage.saveSync(db);
 }
 
 function getEffectiveAuth(

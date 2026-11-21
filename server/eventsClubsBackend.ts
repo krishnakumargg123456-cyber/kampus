@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -607,44 +608,19 @@ function createSeedDatabase(): EventsClubsDatabase {
   };
 }
 
+
+const eventsClubsStorage = new ModuleStorage<EventsClubsDatabase>(
+  'events_clubs',
+  DB_FILE,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): EventsClubsDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.events) && Array.isArray(parsed.clubs)) {
-        return {
-          events: parsed.events,
-          registrations: parsed.registrations || [],
-          teams: parsed.teams || [],
-          certificates: parsed.certificates || [],
-          clubs: parsed.clubs,
-          memberships: parsed.memberships || [],
-          clubActivities: parsed.clubActivities || [],
-          clubAnnouncements: parsed.clubAnnouncements || [],
-          clubGallery: parsed.clubGallery || [],
-          savedEventIdsByUser: parsed.savedEventIdsByUser || {},
-          feedback: parsed.feedback || [],
-          reports: parsed.reports || [],
-          usedCheckInNonces: parsed.usedCheckInNonces || [],
-          organizerOverrides: parsed.organizerOverrides || {},
-          files: parsed.files || {},
-        };
-      }
-    }
-  } catch {
-    // recreate cleanly
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return eventsClubsStorage.get();
 }
 
-function saveDb(db: EventsClubsDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist Events & Clubs DB:', err);
-  }
+function saveDb(db: EventsClubsDatabase): void {
+  eventsClubsStorage.saveSync(db);
 }
 
 function canManageClub(db: EventsClubsDatabase, userId: string, clubId: string): boolean {

@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "KAMPUS",
-    "slug": "kampus-app",
+    "slug": "kampus-student-life-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -36,6 +36,12 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": []
+    "plugins": [],
+    "extra": {
+      "eas": {
+        "projectId": "13acd386-0e49-44ab-aed0-6e93a334e132"
+      }
+    },
+    "owner": "kampusstudent2026s-team"
   }
 }

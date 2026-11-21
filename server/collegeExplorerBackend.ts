@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -1135,28 +1136,19 @@ function createSeedDatabase(): CollegeExplorerDatabase {
   };
 }
 
+
+const collegeExplorerStorage = new ModuleStorage<CollegeExplorerDatabase>(
+  'college_explorer',
+  DB_FILE,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): CollegeExplorerDatabase {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      if (parsed && Array.isArray(parsed.colleges)) {
-        return { ...createSeedDatabase(), ...parsed };
-      }
-    }
-  } catch (err) {
-    console.error('Failed to read College Explorer DB:', err);
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return collegeExplorerStorage.get();
 }
 
-function saveDb(db: CollegeExplorerDatabase) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write College Explorer DB:', err);
-  }
+function saveDb(db: CollegeExplorerDatabase): void {
+  collegeExplorerStorage.saveSync(db);
 }
 
 function isPrivilegedExplorerRole(role: ExplorerRole): boolean {

@@ -3,6 +3,7 @@ import type { Server as HttpServer } from 'http';
 import fs from 'fs';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   ChatAttachmentMeta,
   ChatConversation,
@@ -332,19 +333,14 @@ function createSeedDatabase(): ChatDatabase {
   };
 }
 
+const chatStorage = new ModuleStorage<ChatDatabase>(
+  'chat',
+  DB_PATH,
+  () => createSeedDatabase()
+);
+
 function loadDatabase(): ChatDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf-8');
-      const parsed = JSON.parse(raw) as ChatDatabase;
-      if (parsed && Array.isArray(parsed.conversations) && Array.isArray(parsed.messages)) {
-        return parsed;
-      }
-    }
-  } catch {
-    // fallback to clean seed
-  }
-  return createSeedDatabase();
+  return chatStorage.get();
 }
 
 export function registerChatBackend(app: Express): WebSocketServer {
@@ -352,11 +348,7 @@ export function registerChatBackend(app: Express): WebSocketServer {
   const socketsByUser = new Map<string, Set<WebSocket>>();
 
   const saveDatabase = () => {
-    try {
-      fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-    } catch {
-      // ignore disk write issues in read-only environments
-    }
+    chatStorage.saveSync(db);
   };
 
   const getUserSettings = (userId: string): ChatUserSettings => {

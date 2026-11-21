@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -54,33 +55,19 @@ function createEmptyDb(): PlannerDatabase {
   };
 }
 
+
+const plannerStorage = new ModuleStorage<PlannerDatabase>(
+  'planner',
+  DB_PATH,
+  () => (createEmptyDb())
+);
+
 function loadDb(): PlannerDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')) as Partial<PlannerDatabase>;
-      return {
-        tasks: parsed.tasks || [],
-        events: parsed.events || [],
-        studyPlans: parsed.studyPlans || [],
-        studySessions: parsed.studySessions || [],
-        timetable: parsed.timetable || [],
-        goals: parsed.goals || [],
-        habits: parsed.habits || [],
-        exams: parsed.exams || [],
-        focusSessions: parsed.focusSessions || [],
-        notes: parsed.notes || [],
-      };
-    }
-  } catch {
-    // rebuild clean file on corruption
-  }
-  const initial = createEmptyDb();
-  saveDb(initial);
-  return initial;
+  return plannerStorage.get();
 }
 
 function saveDb(db: PlannerDatabase): void {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  plannerStorage.saveSync(db);
 }
 
 function addDaysToISODate(baseISO: string, days: number): string {

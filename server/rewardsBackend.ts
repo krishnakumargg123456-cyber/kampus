@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -384,38 +385,19 @@ function createSeedDatabase(): RewardsDatabase {
   };
 }
 
+
+const rewardsStorage = new ModuleStorage<RewardsDatabase>(
+  'rewards',
+  DB_PATH,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): RewardsDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf8');
-      const parsed = JSON.parse(raw) as RewardsDatabase;
-      const seed = createSeedDatabase();
-      return {
-        wallets: parsed.wallets || {},
-        transactions: parsed.transactions || [],
-        rules: parsed.rules?.length ? parsed.rules : seed.rules,
-        levels: parsed.levels?.length ? parsed.levels : seed.levels,
-        achievements: parsed.achievements?.length ? parsed.achievements : seed.achievements,
-        unlockedAchievements: parsed.unlockedAchievements || [],
-        challenges: parsed.challenges?.length ? parsed.challenges : seed.challenges,
-        challengeParticipations: parsed.challengeParticipations || [],
-        catalog: parsed.catalog?.length ? parsed.catalog : seed.catalog,
-        redemptions: parsed.redemptions || [],
-        referrals: parsed.referrals || [],
-        auditLogs: parsed.auditLogs || [],
-        roleOverrides: parsed.roleOverrides || {},
-      };
-    }
-  } catch {
-    // rebuild clean DB
-  }
-  const initial = createSeedDatabase();
-  saveDb(initial);
-  return initial;
+  return rewardsStorage.get();
 }
 
 function saveDb(db: RewardsDatabase): void {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  rewardsStorage.saveSync(db);
 }
 
 function ensureWallet(

@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
@@ -297,40 +298,19 @@ const INITIAL_FALLBACK_STATE: StudyHubDatabase = {
   }
 };
 
+
+const studyhubStorage = new ModuleStorage<StudyHubDatabase>(
+  'studyhub',
+  DB_PATH,
+  () => (INITIAL_FALLBACK_STATE)
+);
+
 function loadDb(): StudyHubDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-      if (data && Array.isArray(data.subjects) && data.subjects.length > 0) {
-        return {
-          ...INITIAL_FALLBACK_STATE,
-          ...data,
-          subjects: data.subjects || INITIAL_FALLBACK_STATE.subjects,
-          notes: data.notes || INITIAL_FALLBACK_STATE.notes,
-          materials: data.materials || INITIAL_FALLBACK_STATE.materials,
-          papers: data.papers || INITIAL_FALLBACK_STATE.papers,
-          questions: data.questions || INITIAL_FALLBACK_STATE.questions,
-          testHistory: data.testHistory || [],
-          uploads: data.uploads || [],
-          reminders: data.reminders || [],
-          weeklyLogs: data.weeklyLogs || INITIAL_FALLBACK_STATE.weeklyLogs,
-        };
-      }
-    }
-  } catch (err) {
-    console.error('[StudyHubDB Load Error]:', err);
-  }
-  // Initialize and write default
-  saveDb(INITIAL_FALLBACK_STATE);
-  return INITIAL_FALLBACK_STATE;
+  return studyhubStorage.get();
 }
 
 function saveDb(db: StudyHubDatabase): void {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[StudyHubDB Save Error]:', err);
-  }
+  studyhubStorage.saveSync(db);
 }
 
 export function registerStudyHubBackend(app: Express): void {

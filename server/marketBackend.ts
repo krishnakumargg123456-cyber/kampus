@@ -1,3 +1,4 @@
+import { ModuleStorage } from '../database/moduleStorage.ts';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -499,28 +500,19 @@ function createSeedDatabase(): MarketDatabase {
   };
 }
 
+
+const marketStorage = new ModuleStorage<MarketDatabase>(
+  'market',
+  DB_PATH,
+  () => (createSeedDatabase())
+);
+
 function loadDb(): MarketDatabase {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-      if (parsed && Array.isArray(parsed.listings)) {
-        return parsed as MarketDatabase;
-      }
-    }
-  } catch {
-    // fallback to clean seed
-  }
-  const seeded = createSeedDatabase();
-  saveDb(seeded);
-  return seeded;
+  return marketStorage.get();
 }
 
-function saveDb(db: MarketDatabase) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to save Market DB:', err);
-  }
+function saveDb(db: MarketDatabase): void {
+  marketStorage.saveSync(db);
 }
 
 function isPrivilegedRole(role: MarketRole): boolean {
