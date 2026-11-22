@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,14 +10,19 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
-import { Eye, EyeOff, Mail, Lock, ShieldCheck, ArrowRight } from 'lucide-react-native';
+import { Eye, EyeOff, Mail, Lock, ShieldCheck, ArrowRight, Chrome } from 'lucide-react-native';
+import { useSignIn, useOAuth } from '@clerk/clerk-expo';
+import * as WebBrowser from 'expo-web-browser';
 import { useTheme } from '../../theme/ThemeContext';
-import { useAuth } from '../../context/AuthContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
+
+// Complete pending auth sessions from browser redirects
+WebBrowser.maybeCompleteAuthSession();
 
 export const LoginScreen = ({ navigation }: any) => {
   const { colors, isDark } = useTheme();
-  const { loginWithPassword, sendEmailOtp, verifyOtpAndLogin, isLoading } = useAuth();
+  const { isLoaded: isSignInLoaded, signIn, setActive } = useSignIn();
+  const { startOAuthFlow } = useOAuth({ strategy: 'oauth_google' });
 
   const [activeTab, setActiveTab] = useState<'password' | 'otp'>('password');
   const [email, setEmail] = useState('');
@@ -26,56 +31,234 @@ export const LoginScreen = ({ navigation }: any) => {
   const [showPassword, setShowPassword] = useState(false);
   const [otpSent, setOtpSent] = useState(false);
   const [timer, setTimer] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
-  const handlePasswordLogin = async () => {
-    setErrorMessage('');
-    if (!email.trim() || !password) {
-      setErrorMessage('Please enter both your college email and password.');
-      return;
-    }
-    const res = await loginWithPassword(email.trim(), password);
-    if (!res.success) {
-      setErrorMessage(res.error || 'Login failed. Please check your credentials.');
-    }
+  const actionLock = useRef(false);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    // Warm up the browser on Android for ultra-fast Google OAuth
+    void WebBrowser.warmUpAsync();
+    return () => {
+      void WebBrowser.coolDownAsync();
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const startResendTimer = () => {
+    setTimer(60);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setTimer((prev) => {
+        if (prev <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
-  const handleSendOtp = async () => {
+  /**
+   * 1. Email + Password Login via Clerk
+   */
+  const handlePasswordLogin = async () => {
+    if (actionLock.current || loading) return;
     setErrorMessage('');
     setSuccessMessage('');
-    if (!email.trim() || !email.includes('@')) {
-      setErrorMessage('Please enter a valid college or personal email address.');
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setErrorMessage('Please enter your valid college or personal email address.');
       return;
     }
-    const res = await sendEmailOtp(email.trim(), 'login');
-    if (res.success) {
-      setOtpSent(true);
-      setSuccessMessage(res.message || 'A 6-digit verification code has been dispatched.');
-      setTimer(60);
-      const interval = setInterval(() => {
-        setTimer((prev) => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else {
-      setErrorMessage(res.error || 'Failed to dispatch OTP. Please retry.');
+    if (!password) {
+      setErrorMessage('Please enter your account password.');
+      return;
+    }
+
+    if (!isSignInLoaded || !signIn) {
+      setErrorMessage('Authentication service initializing. Please retry.');
+      return;
+    }
+
+    actionLock.current = true;
+    setLoading(true);
+
+    try {
+      const result = await signIn.create({
+        identifier: cleanEmail,
+        password,
+      });
+
+      if (result.status === 'complete') {
+        await setActive({ session: result.createdSessionId });
+        // Navigation automatically handled by RootNavigator observing isSignedIn
+      } else {
+        setErrorMessage(`Login status: ${result.status}. Additional verification required.`);
+      }
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      if (clerkErr) {
+        if (clerkErr.code === 'form_identifier_not_found') {
+          setErrorMessage('No student account found with this email. Please create one.');
+        } else if (clerkErr.code === 'form_password_incorrect') {
+          setErrorMessage('Incorrect password. Please retry or use Forgot Password.');
+        } else {
+          setErrorMessage(clerkErr.longMessage || clerkErr.message || 'Login failed.');
+        }
+      } else {
+        setErrorMessage(err.message || 'Login failed. Please check your credentials.');
+      }
+    } finally {
+      setLoading(false);
+      actionLock.current = false;
     }
   };
 
-  const handleVerifyOtp = async () => {
+  /**
+   * 2. Send Email OTP for Passwordless Login via Clerk
+   */
+  const handleSendOtp = async () => {
+    if (actionLock.current || loading) return;
     setErrorMessage('');
-    if (otpCode.length < 6) {
+    setSuccessMessage('');
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setErrorMessage('Please enter a valid student email address.');
+      return;
+    }
+
+    if (!isSignInLoaded || !signIn) {
+      setErrorMessage('Authentication service initializing.');
+      return;
+    }
+
+    actionLock.current = true;
+    setLoading(true);
+
+    try {
+      const res = await signIn.create({
+        identifier: cleanEmail,
+      });
+
+      const emailFactor: any = res.supportedFirstFactors?.find(
+        (f: any) => f.strategy === 'email_code'
+      );
+
+      if (!emailFactor) {
+        setErrorMessage('Email code login is not enabled for this account. Please use password login.');
+        return;
+      }
+
+      await signIn.prepareFirstFactor({
+        strategy: 'email_code',
+        emailAddressId: emailFactor.emailAddressId,
+      });
+
+      setOtpSent(true);
+      setSuccessMessage(`A 6-digit verification code has been dispatched to ${cleanEmail}`);
+      setOtpCode('');
+      startResendTimer();
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      if (clerkErr) {
+        if (clerkErr.code === 'form_identifier_not_found') {
+          setErrorMessage('No student account found with this email. Please register first.');
+        } else {
+          setErrorMessage(clerkErr.longMessage || clerkErr.message || 'Failed to dispatch verification code.');
+        }
+      } else {
+        setErrorMessage(err.message || 'Could not send verification code.');
+      }
+    } finally {
+      setLoading(false);
+      actionLock.current = false;
+    }
+  };
+
+  /**
+   * 3. Verify OTP and Complete Login via Clerk
+   */
+  const handleVerifyOtp = async () => {
+    if (actionLock.current || loading) return;
+    setErrorMessage('');
+
+    const cleanCode = otpCode.trim();
+    if (!/^\d{6}$/.test(cleanCode)) {
       setErrorMessage('Please enter the complete 6-digit code.');
       return;
     }
-    const res = await verifyOtpAndLogin(email.trim(), otpCode.trim());
-    if (!res.success) {
-      setErrorMessage(res.error || 'Invalid or expired OTP code.');
+
+    if (!isSignInLoaded || !signIn) {
+      setErrorMessage('Authentication service initializing.');
+      return;
+    }
+
+    actionLock.current = true;
+    setLoading(true);
+
+    try {
+      const res = await signIn.attemptFirstFactor({
+        strategy: 'email_code',
+        code: cleanCode,
+      });
+
+      if (res.status === 'complete') {
+        await setActive({ session: res.createdSessionId });
+      } else {
+        setErrorMessage(`Verification status: ${res.status}.`);
+      }
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      if (clerkErr) {
+        if (clerkErr.code === 'form_code_incorrect') {
+          setErrorMessage('Incorrect verification code. Please check your email.');
+        } else if (clerkErr.code === 'verification_expired') {
+          setErrorMessage('Verification code has expired. Please tap Resend Code.');
+        } else {
+          setErrorMessage(clerkErr.longMessage || clerkErr.message || 'OTP verification failed.');
+        }
+      } else {
+        setErrorMessage(err.message || 'Verification failed. Please retry.');
+      }
+    } finally {
+      setLoading(false);
+      actionLock.current = false;
+    }
+  };
+
+  /**
+   * 4. Google Sign-In via Clerk
+   */
+  const handleGoogleLogin = async () => {
+    if (googleLoading) return;
+    setErrorMessage('');
+    setGoogleLoading(true);
+
+    try {
+      const { createdSessionId, setActive: setOAuthActive } = await startOAuthFlow();
+      if (createdSessionId && setOAuthActive) {
+        await setOAuthActive({ session: createdSessionId });
+      }
+    } catch (err: any) {
+      if (err.message && err.message.includes('dismissed')) {
+        // User voluntarily cancelled the Google prompt
+        return;
+      }
+      const clerkErr = err.errors?.[0];
+      setErrorMessage(
+        clerkErr?.longMessage ||
+          clerkErr?.message ||
+          err.message ||
+          'Google login requires Google provider to be enabled in Clerk Dashboard.'
+      );
+    } finally {
+      setGoogleLoading(false);
     }
   };
 
@@ -106,6 +289,7 @@ export const LoginScreen = ({ navigation }: any) => {
             onPress={() => {
               setActiveTab('password');
               setErrorMessage('');
+              setSuccessMessage('');
             }}
           >
             <Text
@@ -126,6 +310,7 @@ export const LoginScreen = ({ navigation }: any) => {
             onPress={() => {
               setActiveTab('otp');
               setErrorMessage('');
+              setSuccessMessage('');
             }}
           >
             <Text
@@ -197,9 +382,9 @@ export const LoginScreen = ({ navigation }: any) => {
               <TouchableOpacity
                 style={[styles.submitButton, { backgroundColor: colors.primary }]}
                 onPress={handlePasswordLogin}
-                disabled={isLoading}
+                disabled={loading}
               >
-                {isLoading ? (
+                {loading ? (
                   <ActivityIndicator color="#ffffff" />
                 ) : (
                   <>
@@ -216,9 +401,9 @@ export const LoginScreen = ({ navigation }: any) => {
                 <TouchableOpacity
                   style={[styles.submitButton, { backgroundColor: colors.primary, marginTop: Spacing.md }]}
                   onPress={handleSendOtp}
-                  disabled={isLoading}
+                  disabled={loading}
                 >
-                  {isLoading ? (
+                  {loading ? (
                     <ActivityIndicator color="#ffffff" />
                   ) : (
                     <Text style={styles.submitButtonText}>Send 6-Digit Verification Code</Text>
@@ -244,7 +429,7 @@ export const LoginScreen = ({ navigation }: any) => {
 
                   <View style={styles.resendRow}>
                     <Text style={[styles.resendText, { color: colors.textMuted }]}>Didn't receive code?</Text>
-                    <TouchableOpacity onPress={handleSendOtp} disabled={timer > 0}>
+                    <TouchableOpacity onPress={handleSendOtp} disabled={timer > 0 || loading}>
                       <Text style={[styles.resendLink, { color: timer > 0 ? colors.textMuted : colors.primary }]}>
                         {timer > 0 ? `Resend in ${timer}s` : 'Resend Code'}
                       </Text>
@@ -254,9 +439,9 @@ export const LoginScreen = ({ navigation }: any) => {
                   <TouchableOpacity
                     style={[styles.submitButton, { backgroundColor: colors.primary }]}
                     onPress={handleVerifyOtp}
-                    disabled={isLoading}
+                    disabled={loading}
                   >
-                    {isLoading ? (
+                    {loading ? (
                       <ActivityIndicator color="#ffffff" />
                     ) : (
                       <Text style={styles.submitButtonText}>Verify & Login to KAMPUS</Text>
@@ -266,6 +451,31 @@ export const LoginScreen = ({ navigation }: any) => {
               )}
             </>
           )}
+
+          {/* Social Divider */}
+          <View style={styles.dividerRow}>
+            <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            <Text style={[styles.dividerText, { color: colors.textMuted }]}>OR CONTINUE WITH</Text>
+            <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+          </View>
+
+          {/* Google Sign In Button */}
+          <TouchableOpacity
+            style={[styles.googleButton, { backgroundColor: colors.surface, borderColor: colors.border }]}
+            onPress={handleGoogleLogin}
+            disabled={googleLoading}
+          >
+            {googleLoading ? (
+              <ActivityIndicator color={colors.primary} />
+            ) : (
+              <>
+                <View style={styles.googleIconContainer}>
+                  <Text style={{ fontSize: 18, fontWeight: '800', color: '#4285F4' }}>G</Text>
+                </View>
+                <Text style={[styles.googleButtonText, { color: colors.text }]}>Continue with Google</Text>
+              </>
+            )}
+          </TouchableOpacity>
 
           {/* Registration Link */}
           <View style={styles.footerRow}>
@@ -300,63 +510,64 @@ const styles = StyleSheet.create({
   },
   brandTitle: {
     fontSize: 28,
-    fontWeight: '800',
-    letterSpacing: -0.5,
+    fontWeight: '900',
+    letterSpacing: 2,
   },
   brandSubtitle: {
     fontSize: 14,
-    marginTop: 4,
+    marginTop: 2,
   },
   tabContainer: {
     flexDirection: 'row',
-    borderRadius: BorderRadius.md,
+    borderRadius: BorderRadius.lg,
     borderWidth: 1,
     padding: 3,
-    marginBottom: Spacing.md,
+    marginBottom: Spacing.lg,
   },
   tabButton: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: Spacing.sm,
     alignItems: 'center',
-    borderRadius: BorderRadius.sm,
+    borderRadius: BorderRadius.md,
   },
   activeTab: {
+    elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.1,
     shadowRadius: 2,
-    elevation: 2,
   },
   tabText: {
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   alertBox: {
-    padding: Spacing.sm + 4,
+    padding: Spacing.md,
     borderRadius: BorderRadius.md,
     borderWidth: 1,
     marginBottom: Spacing.md,
   },
   alertText: {
     fontSize: 13,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   formContainer: {
-    width: '100%',
+    marginBottom: Spacing.lg,
   },
   label: {
     fontSize: 13,
     fontWeight: '600',
-    marginBottom: 6,
+    marginBottom: Spacing.xs,
   },
   passwordLabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginTop: Spacing.md,
+    marginBottom: Spacing.xs,
   },
   forgotLink: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
   },
   inputWrapper: {
@@ -365,21 +576,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: BorderRadius.md,
     paddingHorizontal: Spacing.md,
-    height: 48,
+    height: 50,
+    marginBottom: Spacing.xs,
   },
   inputIcon: {
     marginRight: Spacing.sm,
+  },
+  eyeIcon: {
+    padding: Spacing.xs,
   },
   input: {
     flex: 1,
     fontSize: 15,
   },
-  eyeIcon: {
-    padding: 4,
-  },
   submitButton: {
     flexDirection: 'row',
-    height: 48,
+    height: 52,
     borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
@@ -390,25 +602,61 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: Spacing.xl,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginHorizontal: Spacing.md,
+  },
+  googleButton: {
+    flexDirection: 'row',
+    height: 52,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  googleIconContainer: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
   resendRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginTop: Spacing.sm,
+    marginBottom: Spacing.sm,
   },
   resendText: {
-    fontSize: 12,
+    fontSize: 13,
   },
   resendLink: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
   },
   footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
+    gap: Spacing.xs,
     marginTop: Spacing.xl,
-    gap: 6,
   },
   footerText: {
     fontSize: 14,

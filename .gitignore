@@ -36,3 +36,5 @@ kampus_icon_temp/
 *.backup
 *.backup_*
 *.tmp
+.expo/
+mobile/.expo/

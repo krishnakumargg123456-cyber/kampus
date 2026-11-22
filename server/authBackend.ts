@@ -1004,9 +1004,15 @@ export function registerAuthBackend(app: Express): void {
         enrollmentNo,
         bio,
         interests,
+        mobile,
+        skills,
       } = req.body;
 
-      if (!clerkId && !email) {
+      // If Authorization header present, derive verified Clerk ID
+      const auth = await authenticateAnyToken(req.headers.authorization);
+      const verifiedClerkId = auth?.userId || clerkId;
+
+      if (!verifiedClerkId && !email) {
         res.status(400).json({ success: false, error: 'Clerk ID or student email is required for profile sync.' });
         return;
       }
@@ -1039,13 +1045,14 @@ export function registerAuthBackend(app: Express): void {
 
       if (existingProfile) {
         // Link Clerk ID if not already set
-        existingProfile.clerkId = clerkId || existingProfile.clerkId;
+        existingProfile.clerkId = verifiedClerkId || existingProfile.clerkId;
         if (fullName && (!existingProfile.fullName || existingProfile.fullName === 'KAMPUS Student' || existingProfile.fullName === 'Priya Sharma')) {
           existingProfile.fullName = fullName;
         }
         if (normalizedEmail && (!existingProfile.email || existingProfile.email === 'priya.sharma@cse.iitb.ac.in')) {
           existingProfile.email = normalizedEmail;
         }
+        if (mobile && !existingProfile.mobile) existingProfile.mobile = mobile;
         if (avatarUrl && !existingProfile.avatarUrl?.startsWith('data:')) {
           existingProfile.avatarUrl = avatarUrl;
         }
@@ -1058,13 +1065,32 @@ export function registerAuthBackend(app: Express): void {
         if (interests && Array.isArray(interests) && interests.length > 0 && (!existingProfile.interests || existingProfile.interests.length === 0)) {
           existingProfile.interests = interests;
         }
+        if (skills && Array.isArray(skills) && skills.length > 0 && (!existingProfile.skills || existingProfile.skills.length === 0)) {
+          existingProfile.skills = skills;
+        }
 
         existingProfile.updatedAt = new Date().toISOString();
         db.profiles[existingKey] = existingProfile;
         if (!saveAccountDb(db)) { throw new Error('Account database write failed.'); }
 
+        // Update PostgreSQL
+        await query(
+          `UPDATE users SET
+             email = COALESCE(NULLIF($1, ''), email),
+             name = COALESCE(NULLIF($2, ''), name),
+             mobile = COALESCE(NULLIF($3, ''), mobile),
+             college = COALESCE(NULLIF($4, ''), college),
+             course = COALESCE(NULLIF($5, ''), course),
+             branch = COALESCE(NULLIF($6, ''), branch),
+             semester = COALESCE(NULLIF($7, ''), semester),
+             enrollment_no = COALESCE(NULLIF($8, ''), enrollment_no),
+             updated_at = NOW()
+           WHERE id = $9 OR email = $1`,
+          [existingProfile.email, existingProfile.fullName, existingProfile.mobile || '', existingProfile.college || '', existingProfile.course || '', existingProfile.branch || '', existingProfile.semester || '', existingProfile.enrollmentNo || '', existingProfile.userId]
+        );
+
         const token = jwt.sign(
-          { userId: existingProfile.userId, clerkId, email: existingProfile.email, role: 'student' },
+          { userId: existingProfile.userId, clerkId: verifiedClerkId, email: existingProfile.email, role: 'student' },
           JWT_SECRET,
           { expiresIn: '30d' }
         );
@@ -1083,18 +1109,18 @@ export function registerAuthBackend(app: Express): void {
       const userId = 'usr_' + Date.now().toString(36) + '_' + crypto.randomBytes(2).toString('hex');
       const newProfile = {
         userId,
-        clerkId: clerkId || userId,
+        clerkId: verifiedClerkId || userId,
         fullName: fullName || (normalizedEmail ? normalizedEmail.split('@')[0] : 'KAMPUS Student'),
         email: normalizedEmail,
-        mobile: '',
+        mobile: mobile || '',
         college: college || '',
         course: course || '',
         branch: branch || '',
-        semester: semester || '',
+        semester: semester || '1',
         enrollmentNo: enrollmentNo || '',
         bio: bio || 'Passionate student navigating campus life & academic excellence.',
         interests: interests || ['Technology', 'Software Development', 'Campus Innovation'],
-        skills: ['Problem Solving', 'Teamwork'],
+        skills: skills || ['Problem Solving', 'Teamwork'],
         avatarUrl: avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80',
         verifiedBadge: true,
         hasCompletedOnboarding: !!(college && course && semester),
@@ -1107,14 +1133,19 @@ export function registerAuthBackend(app: Express): void {
 
       // Persist to PostgreSQL if connected
       await query(
-        `INSERT INTO users (id, email, name, college, course, branch, semester, enrollment_no, is_verified)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
-         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name`,
-        [userId, normalizedEmail, newProfile.fullName, newProfile.college, newProfile.course, newProfile.branch, newProfile.semester, newProfile.enrollmentNo]
+        `INSERT INTO users (id, email, mobile, name, college, course, branch, semester, enrollment_no, bio, skills, interests, is_verified)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE)
+         ON CONFLICT (id) DO UPDATE SET
+           email = EXCLUDED.email,
+           name = EXCLUDED.name,
+           mobile = COALESCE(NULLIF(EXCLUDED.mobile, ''), users.mobile),
+           college = COALESCE(NULLIF(EXCLUDED.college, ''), users.college),
+           course = COALESCE(NULLIF(EXCLUDED.course, ''), users.course)`,
+        [userId, normalizedEmail, newProfile.mobile, newProfile.fullName, newProfile.college, newProfile.course, newProfile.branch, newProfile.semester, newProfile.enrollmentNo, newProfile.bio, newProfile.skills, newProfile.interests]
       );
 
       const token = jwt.sign(
-        { userId, clerkId, email: normalizedEmail, role: 'student' },
+        { userId, clerkId: verifiedClerkId, email: normalizedEmail, role: 'student' },
         JWT_SECRET,
         { expiresIn: '30d' }
       );

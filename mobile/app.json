@@ -2,6 +2,7 @@
   "expo": {
     "name": "KAMPUS",
     "slug": "kampus-student-life-app",
+    "scheme": "kampus",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -36,7 +37,9 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": [],
+    "plugins": [
+      "expo-secure-store"
+    ],
     "extra": {
       "eas": {
         "projectId": "13acd386-0e49-44ab-aed0-6e93a334e132"
