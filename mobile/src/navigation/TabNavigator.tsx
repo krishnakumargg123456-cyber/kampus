@@ -1,41 +1,43 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Home, BookOpen, Users, Sparkles, LayoutGrid } from 'lucide-react-native';
+import { Platform, View, Text, StyleSheet } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HomeScreen } from '../screens/HomeScreen';
 import { StudyHubScreen } from '../screens/study/StudyHubScreen';
 import { CommunityScreen } from '../screens/community/CommunityScreen';
 import { KampusAiScreen } from '../screens/ai/KampusAiScreen';
 import { MoreScreen } from '../screens/more/MoreScreen';
 import { useTheme } from '../theme/ThemeContext';
-import { Platform, View, Text, StyleSheet } from 'react-native';
 
 const Tab = createBottomTabNavigator();
 
 export const TabNavigator = () => {
+  const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+
+  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 8 : 16);
+  const barHeight = Platform.OS === 'ios' ? 56 + bottomInset : 62 + bottomInset;
 
   return (
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#2563eb',
+        tabBarActiveTintColor: '#38bdf8',
         tabBarInactiveTintColor: '#64748b',
+        tabBarShowLabel: true,
         tabBarStyle: {
-          backgroundColor: isDark ? colors.surface : '#ffffff',
-          borderTopColor: isDark ? colors.border : '#e2e8f0',
+          backgroundColor: isDark ? '#070d1e' : '#ffffff',
+          borderTopColor: isDark ? 'rgba(255, 255, 255, 0.08)' : '#e2e8f0',
           borderTopWidth: 1,
-          height: Platform.OS === 'ios' ? 84 : 64,
-          paddingBottom: Platform.OS === 'ios' ? 24 : 8,
+          height: barHeight,
+          paddingBottom: bottomInset,
           paddingTop: 8,
-          elevation: 8,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: -2 },
-          shadowOpacity: 0.05,
-          shadowRadius: 6,
-        },
-        tabBarLabelStyle: {
-          fontSize: 11,
-          fontWeight: '700',
+          elevation: 16,
+          shadowColor: '#000000',
+          shadowOffset: { width: 0, height: -4 },
+          shadowOpacity: 0.15,
+          shadowRadius: 10,
         },
       }}
     >
@@ -45,11 +47,17 @@ export const TabNavigator = () => {
         options={{
           tabBarLabel: ({ focused, color }) => (
             <View style={styles.tabLabelContainer}>
-              <Text style={[styles.tabLabelText, { color }]}>Home</Text>
-              {focused && <View style={styles.activeUnderline} />}
+              <Text style={[styles.tabLabelText, { color, fontWeight: focused ? '800' : '600' }]}>
+                Home
+              </Text>
+              {focused && <View style={styles.activeDot} />}
             </View>
           ),
-          tabBarIcon: ({ color, size }) => <Home size={22} color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && styles.activeIconWrapper]}>
+              <Home size={22} color={color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
         }}
       />
       <Tab.Screen
@@ -58,11 +66,17 @@ export const TabNavigator = () => {
         options={{
           tabBarLabel: ({ focused, color }) => (
             <View style={styles.tabLabelContainer}>
-              <Text style={[styles.tabLabelText, { color }]}>Study</Text>
-              {focused && <View style={styles.activeUnderline} />}
+              <Text style={[styles.tabLabelText, { color, fontWeight: focused ? '800' : '600' }]}>
+                Study
+              </Text>
+              {focused && <View style={styles.activeDot} />}
             </View>
           ),
-          tabBarIcon: ({ color, size }) => <BookOpen size={22} color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && styles.activeIconWrapper]}>
+              <BookOpen size={22} color={color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
         }}
       />
       <Tab.Screen
@@ -71,11 +85,17 @@ export const TabNavigator = () => {
         options={{
           tabBarLabel: ({ focused, color }) => (
             <View style={styles.tabLabelContainer}>
-              <Text style={[styles.tabLabelText, { color }]}>Community</Text>
-              {focused && <View style={styles.activeUnderline} />}
+              <Text style={[styles.tabLabelText, { color, fontWeight: focused ? '800' : '600' }]}>
+                Community
+              </Text>
+              {focused && <View style={styles.activeDot} />}
             </View>
           ),
-          tabBarIcon: ({ color, size }) => <Users size={22} color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && styles.activeIconWrapper]}>
+              <Users size={22} color={color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
         }}
       />
       <Tab.Screen
@@ -84,11 +104,17 @@ export const TabNavigator = () => {
         options={{
           tabBarLabel: ({ focused, color }) => (
             <View style={styles.tabLabelContainer}>
-              <Text style={[styles.tabLabelText, { color }]}>KAMPUS AI</Text>
-              {focused && <View style={styles.activeUnderline} />}
+              <Text style={[styles.tabLabelText, { color, fontWeight: focused ? '800' : '600' }]}>
+                KAMPUS AI
+              </Text>
+              {focused && <View style={[styles.activeDot, { backgroundColor: '#a855f7' }]} />}
             </View>
           ),
-          tabBarIcon: ({ color, size }) => <Sparkles size={22} color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && [styles.activeIconWrapper, { backgroundColor: 'rgba(168, 85, 247, 0.15)' }]]}>
+              <Sparkles size={22} color={focused ? '#a855f7' : color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
         }}
       />
       <Tab.Screen
@@ -97,11 +123,17 @@ export const TabNavigator = () => {
         options={{
           tabBarLabel: ({ focused, color }) => (
             <View style={styles.tabLabelContainer}>
-              <Text style={[styles.tabLabelText, { color }]}>More</Text>
-              {focused && <View style={styles.activeUnderline} />}
+              <Text style={[styles.tabLabelText, { color, fontWeight: focused ? '800' : '600' }]}>
+                More
+              </Text>
+              {focused && <View style={styles.activeDot} />}
             </View>
           ),
-          tabBarIcon: ({ color, size }) => <LayoutGrid size={22} color={color} />,
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && styles.activeIconWrapper]}>
+              <LayoutGrid size={22} color={color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
         }}
       />
     </Tab.Navigator>
@@ -112,18 +144,27 @@ const styles = StyleSheet.create({
   tabLabelContainer: {
     alignItems: 'center',
     position: 'relative',
-    paddingBottom: 2,
+    paddingTop: 2,
   },
   tabLabelText: {
-    fontSize: 10.5,
-    fontWeight: '700',
+    fontSize: 10,
+    letterSpacing: 0.2,
   },
-  activeUnderline: {
-    width: 18,
-    height: 2.5,
-    borderRadius: 1.5,
-    backgroundColor: '#2563eb',
+  activeDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#38bdf8',
     marginTop: 2,
   },
+  iconWrapper: {
+    width: 34,
+    height: 30,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeIconWrapper: {
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+  },
 });
-
