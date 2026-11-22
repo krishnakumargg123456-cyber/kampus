@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,11 +6,16 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
+  Image,
   ActivityIndicator,
   RefreshControl,
   StatusBar,
+  Dimensions,
+  Platform,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
   FileText,
   FolderDown,
@@ -26,11 +31,20 @@ import {
   Zap,
   Sparkles,
   ChevronRight,
+  Plus,
+  X,
+  BookOpen,
+  Compass,
+  Flame,
+  Check,
 } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import { studyHubApi, StudyOverviewData } from '../../services/studyHubApi';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const HORIZONTAL_CARD_WIDTH = Math.min(SCREEN_WIDTH * 0.78, 300);
 
 export const StudyHubScreen = () => {
   const insets = useSafeAreaInsets();
@@ -41,7 +55,7 @@ export const StudyHubScreen = () => {
   const [overview, setOverview] = useState<StudyOverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [quickActionVisible, setQuickActionVisible] = useState(false);
 
   const loadOverview = useCallback(async () => {
     try {
@@ -70,267 +84,504 @@ export const StudyHubScreen = () => {
   const textPrimary = isDark ? '#f8fafc' : '#0f172a';
   const textSecondary = isDark ? '#94a3b8' : '#64748b';
 
-  const SIX_MODULES = [
-    {
-      id: 'notes',
-      title: 'My Notes',
-      subtitle: 'Personal notes, formulas & cheatsheets',
-      route: 'StudyNotes',
-      countText: `${overview?.notesCount ?? 0} Saved`,
-      icon: FileText,
-      color: '#38bdf8',
-      bgLight: 'rgba(56, 189, 248, 0.12)',
-    },
-    {
-      id: 'materials',
-      title: 'Study Materials',
-      subtitle: 'Syllabus, PYQs, slides & textbooks',
-      route: 'StudyMaterials',
-      countText: `${overview?.materialsCount ?? 0} Docs`,
-      icon: FolderDown,
-      color: '#10b981',
-      bgLight: 'rgba(16, 185, 129, 0.12)',
-    },
-    {
-      id: 'assignments',
-      title: 'Assignments & Tasks',
-      subtitle: 'Coursework deadlines & priorities',
+  // Compute urgent assignments and upcoming sessions for the horizontal slider
+  const horizontalItems = [
+    ...(overview?.urgentAssignments || []).map((asgn) => ({
+      id: `asgn_${asgn.id}`,
+      type: 'assignment' as const,
+      title: asgn.title,
+      subject: asgn.subject,
+      badge: `Due ${asgn.dueDate}`,
+      badgeColor: '#ef4444',
+      badgeBg: 'rgba(239, 68, 68, 0.15)',
+      priority: asgn.priority,
       route: 'StudyAssignments',
-      countText: `${overview?.pendingAssignmentsCount ?? 0} Due`,
-      icon: ListTodo,
-      color: '#f59e0b',
-      bgLight: 'rgba(245, 158, 11, 0.12)',
-    },
-    {
-      id: 'planner',
-      title: 'Study Planner',
-      subtitle: 'Daily focus timetable & study slots',
+    })),
+    ...(overview?.todaySessions || []).map((sess) => ({
+      id: `sess_${sess.id}`,
+      type: 'session' as const,
+      title: sess.topic,
+      subject: sess.subject,
+      badge: `${sess.startTime} - ${sess.endTime}`,
+      badgeColor: '#38bdf8',
+      badgeBg: 'rgba(56, 189, 248, 0.15)',
+      priority: 'Today',
       route: 'StudyPlanner',
-      countText: `${overview?.todaySessionsCount ?? 0} Today`,
-      icon: Calendar,
-      color: '#8b5cf6',
-      bgLight: 'rgba(139, 92, 246, 0.12)',
-    },
-    {
-      id: 'quiz',
-      title: 'Quiz & Practice',
-      subtitle: 'Mock tests, auto-grading & review',
-      route: 'StudyQuiz',
-      countText: `${overview?.totalQuizAttempts ?? 0} Tests`,
-      icon: Award,
-      color: '#ec4899',
-      bgLight: 'rgba(236, 72, 153, 0.12)',
-    },
-    {
-      id: 'progress',
-      title: 'Study Progress',
-      subtitle: 'Activity feed & academic metrics',
-      route: 'StudyProgress',
-      countText: `${overview?.averageQuizScore ?? 0}% Avg`,
-      icon: TrendingUp,
-      color: '#06b6d4',
-      bgLight: 'rgba(6, 182, 212, 0.12)',
-    },
+    })),
   ];
 
   return (
-    <View style={[styles.container, { backgroundColor: bg, paddingTop: insets.top }]}>
-      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
+    <View style={[styles.container, { backgroundColor: bg, paddingTop: Math.max(insets.top, Platform.OS === 'android' ? 12 : 0) }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={bg} />
 
-      {/* Top Header */}
+      {/* 1. Header: Elegant & Compact with Safe-Area Respect */}
       <View style={[styles.header, { borderBottomColor: cardBorder }]}>
-        <View>
-          <View style={styles.brandRow}>
-            <Text style={[styles.brandText, { color: '#38bdf8' }]}>KAMPUS</Text>
-            <View style={styles.proPill}>
-              <Text style={styles.proText}>STUDY HUB</Text>
+        <View style={styles.headerLeft}>
+          <View style={styles.brandBadgeRow}>
+            <Text style={[styles.brandText, { color: textPrimary }]}>Study Hub</Text>
+            <View style={styles.proTag}>
+              <Text style={styles.proTagText}>ACADEMICS</Text>
             </View>
           </View>
           <Text style={[styles.headerSubtitle, { color: textSecondary }]}>
-            Your complete academic command center
+            Your personal learning space
           </Text>
         </View>
 
-        <TouchableOpacity
-          onPress={() => navigation.navigate('StudyProgress')}
-          style={[styles.headerProgressBtn, { backgroundColor: cardBg, borderColor: cardBorder }]}
-        >
-          <TrendingUp size={18} color="#38bdf8" />
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => navigation.navigate('StudyNotes')}
+            style={[styles.headerIconBtn, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <Search size={18} color={textSecondary} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => navigation.navigate('StudyProgress')}
+            style={[styles.headerIconBtn, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <TrendingUp size={18} color="#38bdf8" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 90 }]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#38bdf8" />}
         showsVerticalScrollIndicator={false}
       >
-        {/* Quick Search Bar */}
+        {/* 2. Featured Study Hero Card: "Make today count." */}
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => navigation.navigate('StudyPlanner')}
+          style={styles.heroCardContainer}
+        >
+          <Image
+            source={{
+              uri: 'https://images.unsplash.com/photo-1521587760476-6c12a4b040da?w=1000&auto=format&fit=crop&q=80',
+            }}
+            style={styles.heroImage}
+            resizeMode="cover"
+          />
+          <LinearGradient
+            colors={['rgba(8, 13, 26, 0.45)', 'rgba(8, 13, 26, 0.94)']}
+            style={styles.heroGradient}
+          >
+            <View style={styles.heroBadge}>
+              <Flame size={12} color="#f59e0b" fill="#f59e0b" />
+              <Text style={styles.heroBadgeText}>DAILY FOCUS</Text>
+            </View>
+
+            <Text style={styles.heroTitle}>Make today count.</Text>
+            <Text style={styles.heroSubtitle}>
+              Stay focused, keep learning, and reach your academic goals.
+            </Text>
+
+            <View style={styles.heroCtaRow}>
+              <View style={styles.heroCtaBtn}>
+                <Text style={styles.heroCtaBtnText}>Start Studying</Text>
+                <ArrowRight size={14} color="#ffffff" />
+              </View>
+              <Text style={styles.heroSessionIndicator}>
+                {overview?.todaySessionsCount
+                  ? `${overview.todaySessionsCount} sessions planned`
+                  : 'Timetable ready'}
+              </Text>
+            </View>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        {/* 3. Today's Overview: 3 Compact Statistical Metric Cards */}
+        <View style={styles.overviewRow}>
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => navigation.navigate('StudyAssignments')}
+            style={[styles.overviewCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.overviewTop}>
+              <View style={[styles.overviewIconCircle, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
+                <ListTodo size={16} color="#f59e0b" />
+              </View>
+              <Text style={[styles.overviewVal, { color: '#f59e0b' }]}>
+                {overview?.pendingAssignmentsCount ?? 0}
+              </Text>
+            </View>
+            <Text style={[styles.overviewTitle, { color: textPrimary }]}>Tasks Due</Text>
+            <Text style={[styles.overviewSub, { color: textSecondary }]}>Coursework pending</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => navigation.navigate('StudyPlanner')}
+            style={[styles.overviewCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.overviewTop}>
+              <View style={[styles.overviewIconCircle, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                <Calendar size={16} color="#8b5cf6" />
+              </View>
+              <Text style={[styles.overviewVal, { color: '#8b5cf6' }]}>
+                {overview?.todaySessionsCount ?? 0}
+              </Text>
+            </View>
+            <Text style={[styles.overviewTitle, { color: textPrimary }]}>Sessions</Text>
+            <Text style={[styles.overviewSub, { color: textSecondary }]}>Today's focus slots</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => navigation.navigate('StudyQuiz')}
+            style={[styles.overviewCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.overviewTop}>
+              <View style={[styles.overviewIconCircle, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
+                <Award size={16} color="#10b981" />
+              </View>
+              <Text style={[styles.overviewVal, { color: '#10b981' }]}>
+                {overview?.averageQuizScore ? `${overview.averageQuizScore}%` : '—'}
+              </Text>
+            </View>
+            <Text style={[styles.overviewTitle, { color: textPrimary }]}>Quiz Avg</Text>
+            <Text style={[styles.overviewSub, { color: textSecondary }]}>Practice score</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* 4. Core Modules: Asymmetrical Visual Hierarchy (Wide Card + 2x2 Grid + Wide Card) */}
+        <View style={styles.sectionHeader}>
+          <Text style={[styles.sectionTitle, { color: textPrimary }]}>Academic Modules</Text>
+          <Text style={[styles.sectionSubtitle, { color: textSecondary }]}>Fully connected & saved</Text>
+        </View>
+
+        {/* 4A. Featured Wider Card: MY NOTES */}
         <TouchableOpacity
           activeOpacity={0.8}
           onPress={() => navigation.navigate('StudyNotes')}
-          style={[styles.searchBox, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          style={[styles.wideModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
         >
-          <Search size={18} color={textSecondary} />
-          <Text style={[styles.searchPlaceholder, { color: textSecondary }]}>
-            Search notes, syllabus, assignments...
-          </Text>
+          <View style={styles.wideCardLeft}>
+            <View style={[styles.moduleIconBox, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
+              <FileText size={24} color="#38bdf8" />
+            </View>
+            <View style={styles.wideCardTextWrap}>
+              <View style={styles.badgeLine}>
+                <Text style={[styles.wideCardTitle, { color: textPrimary }]}>My Notes</Text>
+                <View style={[styles.countTag, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
+                  <Text style={[styles.countTagText, { color: '#38bdf8' }]}>
+                    {overview?.notesCount ?? 0} saved
+                  </Text>
+                </View>
+              </View>
+              <Text style={[styles.wideCardDesc, { color: textSecondary }]} numberOfLines={2}>
+                Personal study notes, dynamic formulas, exam cheatsheets & tags.
+              </Text>
+            </View>
+          </View>
+          <ChevronRight size={18} color={textSecondary} />
         </TouchableOpacity>
 
-        {/* Live Academic Momentum Card */}
-        <View style={[styles.summaryCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
-          <View style={styles.summaryTopRow}>
-            <View>
-              <Text style={[styles.summaryGreeting, { color: textSecondary }]}>
-                {user?.fullName ? `Welcome back, ${user.fullName.split(' ')[0]}` : 'Welcome back'}
-              </Text>
-              <Text style={[styles.summaryTitle, { color: textPrimary }]}>Today's Study Status</Text>
-            </View>
-            <View style={styles.summaryIconCircle}>
-              <Zap size={20} color="#f59e0b" fill="#f59e0b" />
-            </View>
-          </View>
-
-          <View style={styles.metricsGrid}>
-            <View style={styles.metricBlock}>
-              <Text style={[styles.metricVal, { color: '#38bdf8' }]}>
-                {overview?.notesCount ?? 0}
-              </Text>
-              <Text style={[styles.metricLabel, { color: textSecondary }]}>Notes</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metricBlock}>
-              <Text style={[styles.metricVal, { color: '#f59e0b' }]}>
-                {overview?.pendingAssignmentsCount ?? 0}
-              </Text>
-              <Text style={[styles.metricLabel, { color: textSecondary }]}>Pending</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metricBlock}>
-              <Text style={[styles.metricVal, { color: '#8b5cf6' }]}>
-                {overview?.todaySessionsCount ?? 0}
-              </Text>
-              <Text style={[styles.metricLabel, { color: textSecondary }]}>Sessions</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metricBlock}>
-              <Text style={[styles.metricVal, { color: '#10b981' }]}>
-                {overview?.averageQuizScore ?? 0}%
-              </Text>
-              <Text style={[styles.metricLabel, { color: textSecondary }]}>Quiz Avg</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Six Core Modules Section */}
-        <View style={styles.sectionHeaderRow}>
-          <Text style={[styles.sectionHeading, { color: textPrimary }]}>Core Modules</Text>
-          <Text style={[styles.sectionSub, { color: textSecondary }]}>Verified & Functional</Text>
-        </View>
-
-        <View style={styles.modulesGrid}>
-          {SIX_MODULES.map((item) => {
-            const IconComp = item.icon;
-            return (
-              <TouchableOpacity
-                key={item.id}
-                activeOpacity={0.8}
-                onPress={() => navigation.navigate(item.route)}
-                style={[
-                  styles.moduleCard,
-                  { backgroundColor: cardBg, borderColor: cardBorder },
-                ]}
-              >
-                <View style={styles.moduleCardTop}>
-                  <View style={[styles.moduleIconBox, { backgroundColor: item.bgLight }]}>
-                    <IconComp size={22} color={item.color} />
-                  </View>
-                  <View style={[styles.countPill, { backgroundColor: item.bgLight }]}>
-                    <Text style={[styles.countPillText, { color: item.color }]}>{item.countText}</Text>
-                  </View>
-                </View>
-
-                <Text style={[styles.moduleTitle, { color: textPrimary }]}>{item.title}</Text>
-                <Text style={[styles.moduleSubtitle, { color: textSecondary }]} numberOfLines={2}>
-                  {item.subtitle}
+        {/* 4B. 2x2 Compact Grid: Materials, Assignments, Planner, Quiz */}
+        <View style={styles.compactGrid}>
+          {/* Module 2: Study Materials */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('StudyMaterials')}
+            style={[styles.compactModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.compactCardTop}>
+              <View style={[styles.smallIconBox, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
+                <FolderDown size={20} color="#10b981" />
+              </View>
+              <View style={[styles.miniPill, { backgroundColor: 'rgba(16, 185, 129, 0.12)' }]}>
+                <Text style={[styles.miniPillText, { color: '#10b981' }]}>
+                  {overview?.materialsCount ?? 0} Docs
                 </Text>
+              </View>
+            </View>
+            <Text style={[styles.compactCardTitle, { color: textPrimary }]}>Study Materials</Text>
+            <Text style={[styles.compactCardDesc, { color: textSecondary }]} numberOfLines={2}>
+              Syllabus, PYQs, slides & verified textbooks
+            </Text>
+          </TouchableOpacity>
 
-                <View style={styles.moduleFooter}>
-                  <Text style={[styles.openText, { color: item.color }]}>Open Module</Text>
-                  <ArrowRight size={14} color={item.color} />
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+          {/* Module 3: Assignments & Tasks */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('StudyAssignments')}
+            style={[styles.compactModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.compactCardTop}>
+              <View style={[styles.smallIconBox, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
+                <ListTodo size={20} color="#f59e0b" />
+              </View>
+              <View style={[styles.miniPill, { backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
+                <Text style={[styles.miniPillText, { color: '#f59e0b' }]}>
+                  {overview?.pendingAssignmentsCount ?? 0} Due
+                </Text>
+              </View>
+            </View>
+            <Text style={[styles.compactCardTitle, { color: textPrimary }]}>Assignments</Text>
+            <Text style={[styles.compactCardDesc, { color: textSecondary }]} numberOfLines={2}>
+              Coursework deadlines, priority & submissions
+            </Text>
+          </TouchableOpacity>
+
+          {/* Module 4: Study Planner */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('StudyPlanner')}
+            style={[styles.compactModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.compactCardTop}>
+              <View style={[styles.smallIconBox, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                <Calendar size={20} color="#8b5cf6" />
+              </View>
+              <View style={[styles.miniPill, { backgroundColor: 'rgba(139, 92, 246, 0.12)' }]}>
+                <Text style={[styles.miniPillText, { color: '#8b5cf6' }]}>
+                  {overview?.todaySessionsCount ?? 0} Today
+                </Text>
+              </View>
+            </View>
+            <Text style={[styles.compactCardTitle, { color: textPrimary }]}>Study Planner</Text>
+            <Text style={[styles.compactCardDesc, { color: textSecondary }]} numberOfLines={2}>
+              Timetable, focus slots & conflict validation
+            </Text>
+          </TouchableOpacity>
+
+          {/* Module 5: Quiz & Practice */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('StudyQuiz')}
+            style={[styles.compactModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+          >
+            <View style={styles.compactCardTop}>
+              <View style={[styles.smallIconBox, { backgroundColor: 'rgba(236, 72, 153, 0.15)' }]}>
+                <Award size={20} color="#ec4899" />
+              </View>
+              <View style={[styles.miniPill, { backgroundColor: 'rgba(236, 72, 153, 0.12)' }]}>
+                <Text style={[styles.miniPillText, { color: '#ec4899' }]}>
+                  {overview?.totalQuizAttempts ?? 0} Tests
+                </Text>
+              </View>
+            </View>
+            <Text style={[styles.compactCardTitle, { color: textPrimary }]}>Quiz & Practice</Text>
+            <Text style={[styles.compactCardDesc, { color: textSecondary }]} numberOfLines={2}>
+              Curated mock tests, instant grading & review
+            </Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Urgent Assignments Alert (if any pending) */}
-        {overview?.urgentAssignments && overview.urgentAssignments.length > 0 && (
-          <View style={[styles.urgentSection, { backgroundColor: cardBg, borderColor: cardBorder }]}>
-            <View style={styles.urgentHeader}>
-              <View style={styles.urgentTitleWrap}>
-                <AlertCircle size={18} color="#ef4444" />
-                <Text style={[styles.urgentTitle, { color: textPrimary }]}>Urgent Coursework</Text>
+        {/* 4C. Featured Wider Card: STUDY PROGRESS */}
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => navigation.navigate('StudyProgress')}
+          style={[styles.wideModuleCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
+        >
+          <View style={styles.wideCardLeft}>
+            <View style={[styles.moduleIconBox, { backgroundColor: 'rgba(6, 182, 212, 0.15)' }]}>
+              <TrendingUp size={24} color="#06b6d4" />
+            </View>
+            <View style={styles.wideCardTextWrap}>
+              <View style={styles.badgeLine}>
+                <Text style={[styles.wideCardTitle, { color: textPrimary }]}>Study Progress</Text>
+                <View style={[styles.countTag, { backgroundColor: 'rgba(6, 182, 212, 0.15)' }]}>
+                  <Text style={[styles.countTagText, { color: '#06b6d4' }]}>
+                    {overview?.averageQuizScore ? `${overview.averageQuizScore}% Mastery` : 'Analytics'}
+                  </Text>
+                </View>
               </View>
-              <TouchableOpacity onPress={() => navigation.navigate('StudyAssignments')}>
-                <Text style={styles.seeAllText}>View All</Text>
-              </TouchableOpacity>
+              <Text style={[styles.wideCardDesc, { color: textSecondary }]} numberOfLines={2}>
+                Aggregated focus minutes, task completion rates & chronological study timeline.
+              </Text>
+            </View>
+          </View>
+          <ChevronRight size={18} color={textSecondary} />
+        </TouchableOpacity>
+
+        {/* 5. Horizontal Slider: Upcoming Deadlines & Sessions */}
+        {horizontalItems.length > 0 && (
+          <View style={styles.horizontalSection}>
+            <View style={styles.horizontalSectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textPrimary }]}>Upcoming & Focus</Text>
+              <Text style={[styles.horizontalHint, { color: textSecondary }]}>Swipe horizontally</Text>
             </View>
 
-            {overview.urgentAssignments.slice(0, 2).map((asgn) => (
-              <TouchableOpacity
-                key={asgn.id}
-                onPress={() => navigation.navigate('StudyAssignments')}
-                style={[styles.urgentItem, { borderTopColor: cardBorder }]}
-              >
-                <View style={styles.urgentItemLeft}>
-                  <Text style={[styles.urgentItemTitle, { color: textPrimary }]} numberOfLines={1}>
-                    {asgn.title}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.horizontalScrollContent}
+              snapToInterval={HORIZONTAL_CARD_WIDTH + 12}
+              decelerationRate="fast"
+            >
+              {horizontalItems.map((item) => (
+                <TouchableOpacity
+                  key={item.id}
+                  activeOpacity={0.8}
+                  onPress={() => navigation.navigate(item.route)}
+                  style={[
+                    styles.horizontalItemCard,
+                    { width: HORIZONTAL_CARD_WIDTH, backgroundColor: cardBg, borderColor: cardBorder },
+                  ]}
+                >
+                  <View style={styles.hItemTop}>
+                    <View style={[styles.hBadge, { backgroundColor: item.badgeBg }]}>
+                      <Text style={[styles.hBadgeText, { color: item.badgeColor }]}>{item.badge}</Text>
+                    </View>
+                    <View style={styles.hTypeTag}>
+                      <Text style={[styles.hTypeText, { color: textSecondary }]}>
+                        {item.type === 'assignment' ? 'TASK' : 'SESSION'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text style={[styles.hTitle, { color: textPrimary }]} numberOfLines={2}>
+                    {item.title}
                   </Text>
-                  <Text style={[styles.urgentItemSub, { color: textSecondary }]}>
-                    {asgn.subject} • Due {asgn.dueDate}
+                  <Text style={[styles.hSubject, { color: textSecondary }]} numberOfLines={1}>
+                    {item.subject}
                   </Text>
-                </View>
-                <View style={[styles.urgentPriorityBadge, { backgroundColor: 'rgba(239, 68, 68, 0.15)' }]}>
-                  <Text style={styles.urgentPriorityText}>{asgn.priority}</Text>
-                </View>
-              </TouchableOpacity>
-            ))}
+
+                  <View style={[styles.hFooter, { borderTopColor: cardBorder }]}>
+                    <Text style={styles.hActionText}>Open Details</Text>
+                    <ArrowRight size={12} color="#38bdf8" />
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
           </View>
         )}
 
-        {/* Today's Study Sessions (if any scheduled) */}
-        {overview?.todaySessions && overview.todaySessions.length > 0 && (
-          <View style={[styles.urgentSection, { backgroundColor: cardBg, borderColor: cardBorder }]}>
-            <View style={styles.urgentHeader}>
-              <View style={styles.urgentTitleWrap}>
-                <Clock size={18} color="#38bdf8" />
-                <Text style={[styles.urgentTitle, { color: textPrimary }]}>Today's Focus Slots</Text>
-              </View>
-              <TouchableOpacity onPress={() => navigation.navigate('StudyPlanner')}>
-                <Text style={styles.seeAllText}>View Timetable</Text>
-              </TouchableOpacity>
-            </View>
-
-            {overview.todaySessions.map((sess) => (
-              <TouchableOpacity
-                key={sess.id}
-                onPress={() => navigation.navigate('StudyPlanner')}
-                style={[styles.urgentItem, { borderTopColor: cardBorder }]}
-              >
-                <View style={styles.urgentItemLeft}>
-                  <Text style={[styles.urgentItemTitle, { color: textPrimary }]} numberOfLines={1}>
-                    {sess.topic}
-                  </Text>
-                  <Text style={[styles.urgentItemSub, { color: textSecondary }]}>
-                    {sess.subject} • {sess.startTime} - {sess.endTime}
-                  </Text>
-                </View>
-                <ChevronRight size={18} color={textSecondary} />
-              </TouchableOpacity>
-            ))}
+        {/* 6. Quick Recommendation Card */}
+        <View style={[styles.tipCard, { backgroundColor: isDark ? '#0d1527' : '#f0f9ff', borderColor: cardBorder }]}>
+          <View style={styles.tipIconBox}>
+            <Sparkles size={20} color="#38bdf8" />
           </View>
-        )}
+          <View style={styles.tipTextWrap}>
+            <Text style={[styles.tipTitle, { color: textPrimary }]}>Pro Study Strategy</Text>
+            <Text style={[styles.tipDesc, { color: textSecondary }]}>
+              Schedule focused 45-minute blocks using the Study Planner. Students following scheduled timetable slots retain 35% more knowledge for mid-terms.
+            </Text>
+          </View>
+        </View>
       </ScrollView>
+
+      {/* 7. Quick Action Floating Button */}
+      <TouchableOpacity
+        activeOpacity={0.85}
+        onPress={() => setQuickActionVisible(true)}
+        style={[styles.floatingActionBtn, { bottom: insets.bottom + 20 }]}
+      >
+        <Plus size={24} color="#ffffff" strokeWidth={2.5} />
+      </TouchableOpacity>
+
+      {/* Quick Action Modal Sheet */}
+      <Modal visible={quickActionVisible} animationType="fade" transparent>
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => setQuickActionVisible(false)}
+          style={styles.modalBackdrop}
+        >
+          <View style={[styles.sheetCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+            <View style={styles.sheetHeader}>
+              <Text style={[styles.sheetTitle, { color: textPrimary }]}>Quick Academic Actions</Text>
+              <TouchableOpacity onPress={() => setQuickActionVisible(false)} style={styles.sheetCloseBtn}>
+                <X size={20} color={textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.sheetActionsList}>
+              <TouchableOpacity
+                onPress={() => {
+                  setQuickActionVisible(false);
+                  navigation.navigate('StudyNotes');
+                }}
+                style={[styles.sheetActionItem, { borderColor: cardBorder }]}
+              >
+                <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
+                  <FileText size={18} color="#38bdf8" />
+                </View>
+                <View style={styles.sheetActionTextWrap}>
+                  <Text style={[styles.sheetActionTitle, { color: textPrimary }]}>Create Study Note</Text>
+                  <Text style={[styles.sheetActionSub, { color: textSecondary }]}>
+                    Save formulas, code snippets & cheatsheets
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  setQuickActionVisible(false);
+                  navigation.navigate('StudyAssignments');
+                }}
+                style={[styles.sheetActionItem, { borderColor: cardBorder }]}
+              >
+                <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
+                  <ListTodo size={18} color="#f59e0b" />
+                </View>
+                <View style={styles.sheetActionTextWrap}>
+                  <Text style={[styles.sheetActionTitle, { color: textPrimary }]}>Add Assignment</Text>
+                  <Text style={[styles.sheetActionSub, { color: textSecondary }]}>
+                    Track submission deadline & priority
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  setQuickActionVisible(false);
+                  navigation.navigate('StudyPlanner');
+                }}
+                style={[styles.sheetActionItem, { borderColor: cardBorder }]}
+              >
+                <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                  <Calendar size={18} color="#8b5cf6" />
+                </View>
+                <View style={styles.sheetActionTextWrap}>
+                  <Text style={[styles.sheetActionTitle, { color: textPrimary }]}>Schedule Focus Session</Text>
+                  <Text style={[styles.sheetActionSub, { color: textSecondary }]}>
+                    Reserve dedicated timetable study slots
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  setQuickActionVisible(false);
+                  navigation.navigate('StudyMaterials');
+                }}
+                style={[styles.sheetActionItem, { borderColor: cardBorder }]}
+              >
+                <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
+                  <FolderDown size={18} color="#10b981" />
+                </View>
+                <View style={styles.sheetActionTextWrap}>
+                  <Text style={[styles.sheetActionTitle, { color: textPrimary }]}>Import Material</Text>
+                  <Text style={[styles.sheetActionSub, { color: textSecondary }]}>
+                    Select and store PDF syllabus & past papers
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  setQuickActionVisible(false);
+                  navigation.navigate('StudyQuiz');
+                }}
+                style={[styles.sheetActionItem, { borderColor: cardBorder }]}
+              >
+                <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(236, 72, 153, 0.15)' }]}>
+                  <Award size={18} color="#ec4899" />
+                </View>
+                <View style={styles.sheetActionTextWrap}>
+                  <Text style={[styles.sheetActionTitle, { color: textPrimary }]}>Take Practice Quiz</Text>
+                  <Text style={[styles.sheetActionSub, { color: textSecondary }]}>
+                    Test your understanding with auto-grading
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 };
@@ -343,11 +594,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingVertical: 12,
     borderBottomWidth: 1,
   },
-  brandRow: {
+  headerLeft: {
+    flex: 1,
+  },
+  brandBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
@@ -355,15 +609,15 @@ const styles = StyleSheet.create({
   brandText: {
     fontSize: 22,
     fontWeight: '900',
-    letterSpacing: -0.5,
+    letterSpacing: -0.4,
   },
-  proPill: {
+  proTag: {
     backgroundColor: 'rgba(56, 189, 248, 0.15)',
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 6,
   },
-  proText: {
+  proTagText: {
     color: '#38bdf8',
     fontSize: 10,
     fontWeight: '800',
@@ -373,9 +627,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
-  headerProgressBtn: {
-    width: 40,
-    height: 40,
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  headerIconBtn: {
+    width: 38,
+    height: 38,
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
@@ -385,189 +644,379 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 16,
   },
-  searchBox: {
+  heroCardContainer: {
+    height: 155,
+    borderRadius: 18,
+    overflow: 'hidden',
+    position: 'relative',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  heroImage: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+  },
+  heroGradient: {
+    ...StyleSheet.absoluteFillObject,
+    padding: 16,
+    justifyContent: 'space-between',
+  },
+  heroBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    height: 46,
-    borderRadius: 12,
-    borderWidth: 1,
-    gap: 10,
+    gap: 5,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
-  searchPlaceholder: {
-    fontSize: 13,
+  heroBadgeText: {
+    color: '#f59e0b',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
-  summaryCard: {
-    borderRadius: 18,
-    padding: 18,
-    borderWidth: 1,
-    elevation: 2,
+  heroTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '900',
+    letterSpacing: -0.3,
   },
-  summaryTopRow: {
+  heroSubtitle: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  heroCtaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    paddingTop: 4,
   },
-  summaryGreeting: {
+  heroCtaBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0284c7',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 10,
+    gap: 6,
+  },
+  heroCtaBtnText: {
+    color: '#ffffff',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  heroSessionIndicator: {
+    color: '#94a3b8',
+    fontSize: 11,
     fontWeight: '600',
-    marginBottom: 2,
   },
-  summaryTitle: {
-    fontSize: 18,
-    fontWeight: '800',
+  overviewRow: {
+    flexDirection: 'row',
+    gap: 10,
   },
-  summaryIconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+  overviewCard: {
+    flex: 1,
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+  },
+  overviewTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  overviewIconCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  metricsGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.06)',
-  },
-  metricBlock: {
-    alignItems: 'center',
-  },
-  metricVal: {
-    fontSize: 22,
+  overviewVal: {
+    fontSize: 18,
     fontWeight: '900',
   },
-  metricLabel: {
-    fontSize: 11,
-    marginTop: 3,
+  overviewTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 1,
   },
-  metricDivider: {
-    width: 1,
-    height: 26,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  overviewSub: {
+    fontSize: 10,
   },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
+  sectionHeader: {
     marginTop: 4,
   },
-  sectionHeading: {
-    fontSize: 18,
+  sectionTitle: {
+    fontSize: 17,
     fontWeight: '800',
   },
-  sectionSub: {
+  sectionSubtitle: {
     fontSize: 12,
+    marginTop: 1,
   },
-  modulesGrid: {
+  wideModuleCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  wideCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    flex: 1,
+  },
+  moduleIconBox: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wideCardTextWrap: {
+    flex: 1,
+    paddingRight: 8,
+  },
+  badgeLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 3,
+  },
+  wideCardTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  countTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  countTagText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  wideCardDesc: {
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  compactGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 12,
   },
-  moduleCard: {
+  compactModuleCard: {
+    width: (SCREEN_WIDTH - 32 - 12) / 2,
+    padding: 14,
     borderRadius: 16,
-    padding: 16,
     borderWidth: 1,
-    elevation: 2,
   },
-  moduleCardTop: {
+  compactCardTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 10,
   },
-  moduleIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+  smallIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  countPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
+  miniPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
-  countPillText: {
-    fontSize: 11,
+  miniPillText: {
+    fontSize: 10,
     fontWeight: '800',
   },
-  moduleTitle: {
-    fontSize: 16,
+  compactCardTitle: {
+    fontSize: 14,
     fontWeight: '800',
     marginBottom: 4,
   },
-  moduleSubtitle: {
-    fontSize: 12,
-    lineHeight: 17,
-    marginBottom: 12,
+  compactCardDesc: {
+    fontSize: 11,
+    lineHeight: 15,
   },
-  moduleFooter: {
+  horizontalSection: {
+    marginTop: 4,
+  },
+  horizontalSectionHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.05)',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginBottom: 10,
   },
-  openText: {
-    fontSize: 12,
-    fontWeight: '700',
+  horizontalHint: {
+    fontSize: 11,
   },
-  urgentSection: {
+  horizontalScrollContent: {
+    gap: 12,
+  },
+  horizontalItemCard: {
     borderRadius: 16,
-    padding: 16,
+    padding: 14,
     borderWidth: 1,
+    justifyContent: 'space-between',
   },
-  urgentHeader: {
+  hItemTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
   },
-  urgentTitleWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  urgentTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  seeAllText: {
-    fontSize: 12,
-    color: '#38bdf8',
-    fontWeight: '700',
-  },
-  urgentItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderTopWidth: 1,
-  },
-  urgentItemLeft: {
-    flex: 1,
-    paddingRight: 8,
-  },
-  urgentItemTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  urgentItemSub: {
-    fontSize: 11,
-  },
-  urgentPriorityBadge: {
+  hBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 6,
   },
-  urgentPriorityText: {
-    color: '#ef4444',
+  hBadgeText: {
     fontSize: 10,
+    fontWeight: '800',
+  },
+  hTypeTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  hTypeText: {
+    fontSize: 9,
     fontWeight: '700',
+  },
+  hTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 19,
+    marginBottom: 3,
+  },
+  hSubject: {
+    fontSize: 11,
+    marginBottom: 10,
+  },
+  hFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingTop: 8,
+    borderTopWidth: 1,
+  },
+  hActionText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
+  tipCard: {
+    flexDirection: 'row',
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 12,
+    alignItems: 'flex-start',
+  },
+  tipIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  tipTextWrap: {
+    flex: 1,
+  },
+  tipTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  tipDesc: {
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  floatingActionBtn: {
+    position: 'absolute',
+    right: 20,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: '#0284c7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'flex-end',
+  },
+  sheetCard: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    padding: 20,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  sheetTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  sheetCloseBtn: {
+    padding: 4,
+  },
+  sheetActionsList: {
+    gap: 10,
+    paddingBottom: 16,
+  },
+  sheetActionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+  },
+  sheetIconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetActionTextWrap: {
+    flex: 1,
+  },
+  sheetActionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  sheetActionSub: {
+    fontSize: 11,
   },
 });
