@@ -1,8 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   useAuth as useClerkAuth,
   useUser as useClerkUser,
-  useClerk,
   useSignIn,
   useSignUp,
 } from '@clerk/clerk-expo';
@@ -99,14 +98,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isInternalLoading, setIsInternalLoading] = useState(false);
   const isSyncingRef = useRef(false);
 
-  // Sync token and initial student profile whenever Clerk auth state changes
+  // Synchronize student profile and JWT whenever Clerk auth state updates
   useEffect(() => {
     let isMounted = true;
 
     async function syncClerkSession() {
       if (!isAuthLoaded) return;
 
-      if (!isSignedIn || !clerkUser) {
+      if (!isSignedIn) {
         if (isMounted) {
           setUser(null);
           setToken(null);
@@ -119,14 +118,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!isMounted) return;
 
         setToken(sessionToken);
-        const mapped = mapClerkUserToStudent(clerkUser);
-        setUser(mapped);
 
-        // Synchronize with backend profile non-blockingly
-        if (!isSyncingRef.current) {
-          isSyncingRef.current = true;
-          void syncBackendProfileInternal(mapped, sessionToken).finally(() => {
-            isSyncingRef.current = false;
+        // If Clerk user is available, map it. Otherwise create a minimal valid user profile
+        if (clerkUser) {
+          const mapped = mapClerkUserToStudent(clerkUser);
+          if (isMounted) setUser(mapped);
+
+          // Synchronize profile with backend non-blockingly
+          if (!isSyncingRef.current) {
+            isSyncingRef.current = true;
+            void syncBackendProfileInternal(mapped, sessionToken).finally(() => {
+              isSyncingRef.current = false;
+            });
+          }
+        } else if (userId && !user) {
+          // Provide instant fallback so the student is never blocked
+          setUser({
+            userId,
+            clerkId: userId,
+            fullName: 'KAMPUS Student',
+            email: '',
+            mobile: '',
+            college: '',
+            course: '',
+            semester: '1',
+            enrollmentNo: '',
+            avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80',
+            verifiedBadge: true,
+            hasCompletedOnboarding: false,
+            role: 'student',
           });
         }
       } catch (err: any) {
@@ -139,7 +159,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       isMounted = false;
     };
-  }, [isAuthLoaded, isSignedIn, clerkUser, getToken]);
+  }, [isAuthLoaded, isSignedIn, clerkUser, userId, getToken]);
 
   const syncBackendProfileInternal = async (
     profileData: Partial<StudentUser>,
@@ -178,7 +198,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
     } catch (err: any) {
-      // Background sync retry tolerance — never block the user
+      // Background sync fault tolerance — never break active Clerk session
       console.warn('[Profile Backend Sync Notice]:', err.message);
     }
   };
@@ -207,7 +227,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
 
       if (result.status === 'complete') {
-        await setSignInActive({ session: result.createdSessionId });
+        if (setSignInActive) {
+          await setSignInActive({ session: result.createdSessionId });
+        }
         return { success: true, createdSessionId: result.createdSessionId };
       }
 
@@ -218,42 +240,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: false, error: `Login status: ${result.status}` };
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Login failed. Please check your credentials.';
-      return { success: false, error: msg };
+      if (clerkErr) {
+        if (clerkErr.code === 'form_identifier_not_found') {
+          return { success: false, error: 'No student account found with this email. Please register.' };
+        }
+        if (clerkErr.code === 'form_password_incorrect') {
+          return { success: false, error: 'Incorrect password. Please verify and try again.' };
+        }
+        return { success: false, error: clerkErr.longMessage || clerkErr.message || 'Login failed.' };
+      }
+      return { success: false, error: err.message || 'Login failed. Please check your credentials.' };
     } finally {
       setIsInternalLoading(false);
     }
   };
 
   /**
-   * Clerk Email OTP Dispatch (For login or password reset)
+   * Send Email OTP for Login via Clerk
    */
-  const sendEmailOtp = async (email: string, purpose = 'login'): Promise<AuthResult> => {
+  const sendEmailOtp = async (email: string): Promise<AuthResult> => {
     if (!isSignInLoaded || !signIn) {
-      return { success: false, error: 'Authentication service initializing. Please retry.' };
+      return { success: false, error: 'Authentication engine is initializing.' };
     }
 
+    setIsInternalLoading(true);
     try {
-      const normalizedEmail = email.trim().toLowerCase();
-
-      if (purpose === 'forgot_password') {
-        await signIn.create({
-          strategy: 'reset_password_email_code',
-          identifier: normalizedEmail,
-        });
-        return { success: true, message: `Password reset code sent to ${normalizedEmail}` };
-      }
-
-      const res = await signIn.create({
-        identifier: normalizedEmail,
-      });
-
+      const cleanEmail = email.trim().toLowerCase();
+      const res = await signIn.create({ identifier: cleanEmail });
       const emailFactor: any = res.supportedFirstFactors?.find(
         (f: any) => f.strategy === 'email_code'
       );
 
       if (!emailFactor) {
-        return { success: false, error: 'Email verification code is not supported for this account.' };
+        return { success: false, error: 'Email code login is not enabled for this account. Please use password login.' };
       }
 
       await signIn.prepareFirstFactor({
@@ -261,16 +280,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         emailAddressId: emailFactor.emailAddressId,
       });
 
-      return { success: true, message: `6-digit verification code dispatched to ${normalizedEmail}` };
+      return { success: true, message: 'Verification code sent.' };
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Could not send verification code.';
-      return { success: false, error: msg };
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Could not send OTP.' };
+    } finally {
+      setIsInternalLoading(false);
     }
   };
 
   /**
-   * Verify OTP and Login via Clerk
+   * Verify Login OTP via Clerk
    */
   const verifyOtpAndLogin = async (email: string, code: string): Promise<AuthResult> => {
     if (!isSignInLoaded || !signIn) {
@@ -285,151 +305,171 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
 
       if (res.status === 'complete') {
-        await setSignInActive({ session: res.createdSessionId });
+        if (setSignInActive) {
+          await setSignInActive({ session: res.createdSessionId });
+        }
         return { success: true, createdSessionId: res.createdSessionId };
       }
 
       return { success: false, error: `Verification status: ${res.status}` };
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Invalid or expired verification code.';
-      return { success: false, error: msg };
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'OTP verification failed.' };
     } finally {
       setIsInternalLoading(false);
     }
   };
 
   /**
-   * Registration OTP verification compatibility wrapper
+   * Register a new student via Clerk
+   */
+  const registerStudent = async (formData: any): Promise<AuthResult> => {
+    if (!isSignUpLoaded || !signUp) {
+      return { success: false, error: 'Registration engine is initializing.' };
+    }
+
+    setIsInternalLoading(true);
+    try {
+      const emailClean = formData.email.trim().toLowerCase();
+      const parts = (formData.fullName || '').trim().split(' ');
+      const firstName = parts[0] || 'KAMPUS';
+      const lastName = parts.slice(1).join(' ') || 'Student';
+
+      await signUp.create({
+        emailAddress: emailClean,
+        password: formData.password,
+        firstName,
+        lastName,
+        unsafeMetadata: {
+          fullName: formData.fullName,
+          mobile: formData.mobile,
+          college: formData.college,
+          course: formData.course,
+          branch: formData.branch,
+          semester: formData.semester,
+          enrollmentNo: formData.enrollmentNo,
+        },
+      });
+
+      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
+      return { success: true, message: 'Verification code dispatched to your email.' };
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Registration failed.' };
+    } finally {
+      setIsInternalLoading(false);
+    }
+  };
+
+  /**
+   * Verify Registration OTP and Complete Account Setup via Clerk
    */
   const verifyRegistrationOtp = async (email: string, code: string): Promise<AuthResult> => {
     if (!isSignUpLoaded || !signUp) {
       return { success: false, error: 'Registration engine is initializing.' };
     }
 
+    setIsInternalLoading(true);
     try {
       const completeSignUp = await signUp.attemptEmailAddressVerification({
         code: code.trim(),
       });
 
       if (completeSignUp.status === 'complete') {
-        await setSignUpActive({ session: completeSignUp.createdSessionId });
-        return { success: true, verificationToken: 'clerk_verified' };
+        if (setSignUpActive) {
+          await setSignUpActive({ session: completeSignUp.createdSessionId });
+        }
+        return { success: true, createdSessionId: completeSignUp.createdSessionId };
       }
 
       return { success: false, error: `Verification status: ${completeSignUp.status}` };
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Invalid verification code.';
-      return { success: false, error: msg };
-    }
-  };
-
-  /**
-   * Complete student registration compatibility wrapper
-   */
-  const registerStudent = async (formData: any): Promise<AuthResult> => {
-    if (!isSignUpLoaded || !signUp) {
-      return { success: false, error: 'Registration service initializing.' };
-    }
-
-    setIsInternalLoading(true);
-    try {
-      const parts = (formData.fullName || '').trim().split(' ');
-      const firstName = parts[0] || 'KAMPUS';
-      const lastName = parts.slice(1).join(' ') || 'Student';
-
-      await signUp.create({
-        emailAddress: formData.email.trim().toLowerCase(),
-        password: formData.password,
-        firstName,
-        lastName,
-        unsafeMetadata: {
-          mobile: formData.mobile || '',
-          college: formData.college || '',
-          course: formData.course || '',
-          branch: formData.branch || '',
-          semester: formData.semester || '1',
-          enrollmentNo: formData.enrollmentNo || '',
-          interests: formData.interests || [],
-          skills: formData.skills || [],
-        },
-      });
-
-      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
-      return { success: true, message: 'Verification code sent.' };
-    } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Registration failed.';
-      return { success: false, error: msg };
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'OTP verification failed.' };
     } finally {
       setIsInternalLoading(false);
     }
   };
 
+  /**
+   * Initiate Password Reset via Clerk
+   */
   const forgotPassword = async (email: string): Promise<AuthResult> => {
-    return sendEmailOtp(email, 'forgot_password');
-  };
-
-  const resetPassword = async (
-    email: string,
-    code: string,
-    newPass: string
-  ): Promise<AuthResult> => {
     if (!isSignInLoaded || !signIn) {
       return { success: false, error: 'Authentication engine is initializing.' };
     }
 
+    setIsInternalLoading(true);
     try {
-      const res = await signIn.attemptFirstFactor({
+      await signIn.create({
+        strategy: 'reset_password_email_code',
+        identifier: email.trim().toLowerCase(),
+      });
+      return { success: true, message: 'Password reset code sent to your email.' };
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Password reset request failed.' };
+    } finally {
+      setIsInternalLoading(false);
+    }
+  };
+
+  /**
+   * Complete Password Reset with New Password via Clerk
+   */
+  const resetPassword = async (email: string, code: string, newPass: string): Promise<AuthResult> => {
+    if (!isSignInLoaded || !signIn) {
+      return { success: false, error: 'Authentication engine is initializing.' };
+    }
+
+    setIsInternalLoading(true);
+    try {
+      const result = await signIn.attemptFirstFactor({
         strategy: 'reset_password_email_code',
         code: code.trim(),
         password: newPass,
       });
 
-      if (res.status === 'complete') {
-        await setSignInActive({ session: res.createdSessionId });
-        return { success: true, message: 'Password reset successful.' };
+      if (result.status === 'complete') {
+        if (setSignInActive) {
+          await setSignInActive({ session: result.createdSessionId });
+        }
+        return { success: true, createdSessionId: result.createdSessionId };
       }
 
-      return { success: false, error: `Password reset status: ${res.status}` };
+      return { success: true, message: 'Password updated. Please sign in.' };
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      const msg = clerkErr?.longMessage || clerkErr?.message || err.message || 'Password reset failed.';
-      return { success: false, error: msg };
+      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Password reset failed.' };
+    } finally {
+      setIsInternalLoading(false);
     }
   };
 
+  /**
+   * Secure Logout from Clerk Session
+   */
   const logout = async () => {
     try {
+      setIsInternalLoading(true);
       await signOut();
       setUser(null);
       setToken(null);
     } catch (err: any) {
-      console.warn('[Logout Warning]:', err.message);
-      setUser(null);
-      setToken(null);
+      console.warn('[Logout Notice]:', err.message);
+    } finally {
+      setIsInternalLoading(false);
     }
   };
 
   const updateProfile = async (updates: Partial<StudentUser>) => {
-    if (!clerkUser) return;
-    try {
-      await clerkUser.update({
-        unsafeMetadata: {
-          ...clerkUser.unsafeMetadata,
-          ...updates,
-        },
-      });
-      setUser((prev) => (prev ? { ...prev, ...updates } : null));
-      void syncBackendProfile(updates);
-    } catch (err: any) {
-      console.warn('[Profile Update Warning]:', err.message);
-    }
+    setUser((prev) => (prev ? { ...prev, ...updates } : null));
+    await syncBackendProfile(updates);
   };
 
-  const isLoading = !isAuthLoaded || isInternalLoading || (isSignedIn && !isUserLoaded);
-  const isAuthenticated = Boolean(isAuthLoaded && isSignedIn && user);
+  // Single authoritative source of truth: Clerk session determines authentication
+  const isLoading = !isAuthLoaded || isInternalLoading || (isSignedIn && !isUserLoaded && !user);
+  const isAuthenticated = Boolean(isAuthLoaded && isSignedIn);
 
   return (
     <AuthContext.Provider

@@ -23,7 +23,6 @@ import {
   CheckCircle2,
   ArrowRight,
   ArrowLeft,
-  RotateCcw,
 } from 'lucide-react-native';
 import { useSignUp } from '@clerk/clerk-expo';
 import { useTheme } from '../../theme/ThemeContext';
@@ -215,7 +214,9 @@ export const RegisterScreen = ({ navigation }: any) => {
 
         if (completeSignUp.status === 'complete') {
           // Activate Clerk session immediately
-          await setActive({ session: completeSignUp.createdSessionId });
+          if (setActive) {
+            await setActive({ session: completeSignUp.createdSessionId });
+          }
 
           // Synchronize profile with KAMPUS backend asynchronously
           void syncBackendProfile({
@@ -229,8 +230,6 @@ export const RegisterScreen = ({ navigation }: any) => {
             semester: semester.trim(),
             enrollmentNo: enrollmentNo.trim(),
           });
-
-          // Authenticated state in Clerk automatically navigates to MainTabs via RootNavigator!
         } else {
           setErrorMessage(`Verification status: ${completeSignUp.status}. Please check your details.`);
         }
@@ -266,7 +265,7 @@ export const RegisterScreen = ({ navigation }: any) => {
       startResendTimer();
     } catch (err: any) {
       const clerkErr = err.errors?.[0];
-      setErrorMessage(clerkErr?.longMessage || clerkErr?.message || 'Could not resend verification code.');
+      setErrorMessage(clerkErr?.longMessage || clerkErr?.message || 'Could not resend verification code. Please step back to re-enter details.');
     } finally {
       setLoading(false);
     }
@@ -278,34 +277,34 @@ export const RegisterScreen = ({ navigation }: any) => {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        {/* Stepper Header */}
-        <View style={styles.stepperContainer}>
-          <Text style={[styles.stepLabel, { color: colors.primary }]}>STEP {step} OF 4</Text>
-          <View style={[styles.progressTrack, { backgroundColor: colors.borderLight }]}>
-            <View
-              style={[
-                styles.progressBar,
-                { backgroundColor: colors.primary, width: `${(step / 4) * 100}%` },
-              ]}
-            />
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={[styles.brandBadge, { backgroundColor: colors.primaryLight }]}>
+            <ShieldCheck size={28} color={colors.primary} />
+          </View>
+          <Text style={[styles.brandTitle, { color: colors.text }]}>Join KAMPUS</Text>
+          <Text style={[styles.brandSubtitle, { color: colors.textSecondary }]}>
+            Step {step} of 4: {step === 1 ? 'Personal Profile' : step === 2 ? 'Academic Details' : step === 3 ? 'Security' : 'Email Verification'}
+          </Text>
+
+          {/* Step Dots */}
+          <View style={styles.dotsRow}>
+            {[1, 2, 3, 4].map((s) => (
+              <View
+                key={s}
+                style={[
+                  styles.dot,
+                  {
+                    backgroundColor: s <= step ? colors.primary : colors.border,
+                    width: s === step ? 24 : 8,
+                  },
+                ]}
+              />
+            ))}
           </View>
         </View>
 
-        {/* Dynamic Titles */}
-        <Text style={[styles.title, { color: colors.text }]}>
-          {step === 1 && 'Personal Information'}
-          {step === 2 && 'Academic Background'}
-          {step === 3 && 'Account Security'}
-          {step === 4 && 'Verify College Email'}
-        </Text>
-        <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          {step === 1 && 'Let’s start with your verified student contact details.'}
-          {step === 2 && 'Connect with your campus community & classmates.'}
-          {step === 3 && 'Create a strong password to protect your student account.'}
-          {step === 4 && `Enter the 6-digit code dispatched to ${email}`}
-        </Text>
-
-        {/* Feedback Alerts */}
+        {/* Alerts */}
         {errorMessage ? (
           <View style={[styles.alertBox, { backgroundColor: colors.error + '15', borderColor: colors.error }]}>
             <Text style={[styles.alertText, { color: colors.error }]}>{errorMessage}</Text>
@@ -318,10 +317,10 @@ export const RegisterScreen = ({ navigation }: any) => {
           </View>
         ) : null}
 
-        {/* STEP 1: PERSONAL INFORMATION */}
+        {/* STEP 1: PERSONAL DETAILS */}
         {step === 1 && (
           <View style={styles.formContainer}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Full Legal Name *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>Full Name *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <User size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -330,11 +329,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholderTextColor={colors.textMuted}
                 value={fullName}
                 onChangeText={setFullName}
-                autoCapitalize="words"
               />
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Student / College Email *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>College / Student Email *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Mail size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
@@ -349,12 +347,12 @@ export const RegisterScreen = ({ navigation }: any) => {
               />
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Mobile Number (Optional)</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Mobile Number (Optional)</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Phone size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="e.g. +91 9876543210"
+                placeholder="e.g. +91 98765 43210"
                 placeholderTextColor={colors.textMuted}
                 value={mobile}
                 onChangeText={setMobile}
@@ -364,40 +362,40 @@ export const RegisterScreen = ({ navigation }: any) => {
           </View>
         )}
 
-        {/* STEP 2: ACADEMIC BACKGROUND */}
+        {/* STEP 2: ACADEMIC DETAILS */}
         {step === 2 && (
           <View style={styles.formContainer}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>College / University Name *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>College / University *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <GraduationCap size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="e.g. IIT Bombay"
+                placeholder="e.g. IIT Bombay / Delhi University"
                 placeholderTextColor={colors.textMuted}
                 value={college}
                 onChangeText={setCollege}
               />
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Degree & Course *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Degree / Course *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <BookOpen size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="e.g. B.Tech Computer Science"
+                placeholder="e.g. B.Tech / B.Sc / MBA"
                 placeholderTextColor={colors.textMuted}
                 value={course}
                 onChangeText={setCourse}
               />
             </View>
 
-            <View style={styles.row}>
-              <View style={{ flex: 1, marginRight: Spacing.xs }}>
-                <Text style={[styles.label, { color: colors.textSecondary }]}>Branch / Stream</Text>
+            <View style={styles.splitRow}>
+              <View style={{ flex: 1, marginRight: Spacing.sm }}>
+                <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Branch / Stream</Text>
                 <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                   <TextInput
                     style={[styles.input, { color: colors.text }]}
-                    placeholder="e.g. CSE"
+                    placeholder="e.g. CSE / ECE"
                     placeholderTextColor={colors.textMuted}
                     value={branch}
                     onChangeText={setBranch}
@@ -405,12 +403,12 @@ export const RegisterScreen = ({ navigation }: any) => {
                 </View>
               </View>
 
-              <View style={{ width: 100, marginLeft: Spacing.xs }}>
-                <Text style={[styles.label, { color: colors.textSecondary }]}>Semester</Text>
+              <View style={{ width: 100 }}>
+                <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Semester</Text>
                 <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                   <TextInput
-                    style={[styles.input, { color: colors.text }]}
-                    placeholder="e.g. 6"
+                    style={[styles.input, { color: colors.text, textAlign: 'center' }]}
+                    placeholder="1"
                     placeholderTextColor={colors.textMuted}
                     value={semester}
                     onChangeText={setSemester}
@@ -420,11 +418,11 @@ export const RegisterScreen = ({ navigation }: any) => {
               </View>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Enrollment / Roll Number (Optional)</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Enrollment / Roll No (Optional)</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="e.g. 2024CS0142"
+                placeholder="e.g. 22B030149"
                 placeholderTextColor={colors.textMuted}
                 value={enrollmentNo}
                 onChangeText={setEnrollmentNo}
@@ -434,15 +432,15 @@ export const RegisterScreen = ({ navigation }: any) => {
           </View>
         )}
 
-        {/* STEP 3: ACCOUNT SECURITY */}
+        {/* STEP 3: PASSWORD & SECURITY */}
         {step === 3 && (
           <View style={styles.formContainer}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Account Password *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>Create Password (Min 8 chars) *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="At least 8 characters"
+                placeholder="Choose a strong password"
                 placeholderTextColor={colors.textMuted}
                 value={password}
                 onChangeText={setPassword}
@@ -453,12 +451,12 @@ export const RegisterScreen = ({ navigation }: any) => {
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Confirm Password *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm Password *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <ShieldCheck size={18} color={colors.textMuted} style={styles.inputIcon} />
+              <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="Retype your password"
+                placeholder="Re-enter your password"
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
@@ -468,68 +466,32 @@ export const RegisterScreen = ({ navigation }: any) => {
                 {showConfirmPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>
-
-            <View style={[styles.securityNotice, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}>
-              <CheckCircle2 size={16} color={colors.success} style={{ marginRight: 8 }} />
-              <Text style={[styles.noticeText, { color: colors.textSecondary }]}>
-                Your account is protected by Clerk enterprise-grade identity security.
-              </Text>
-            </View>
           </View>
         )}
 
-        {/* STEP 4: EMAIL OTP VERIFICATION */}
+        {/* STEP 4: OTP VERIFICATION */}
         {step === 4 && (
           <View style={styles.formContainer}>
-            <View style={[styles.emailSummaryCard, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.summaryLabel, { color: colors.textMuted }]}>Verification Sent To</Text>
-                <Text style={[styles.summaryEmail, { color: colors.text }]}>{email}</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => {
-                  setStep(1);
-                  setErrorMessage('');
-                  setSuccessMessage('');
-                }}
-              >
-                <Text style={[styles.editEmailLink, { color: colors.primary }]}>Change Email</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>
-              Enter 6-Digit Code *
+            <Text style={[styles.label, { color: colors.textSecondary }]}>
+              Enter 6-Digit Code sent to {email}
             </Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <ShieldCheck size={18} color={colors.primary} style={styles.inputIcon} />
               <TextInput
-                style={[
-                  styles.input,
-                  { color: colors.text, letterSpacing: 8, fontSize: 20, fontWeight: '700' },
-                ]}
+                style={[styles.input, { color: colors.text, letterSpacing: 6, fontSize: 18, fontWeight: '700' }]}
                 placeholder="• • • • • •"
                 placeholderTextColor={colors.textMuted}
                 value={otpCode}
-                onChangeText={(text) => {
-                  setOtpCode(text);
-                  if (text.length === 6) {
-                    setErrorMessage('');
-                  }
-                }}
+                onChangeText={setOtpCode}
                 keyboardType="number-pad"
                 maxLength={6}
               />
             </View>
 
             <View style={styles.resendRow}>
-              <Text style={[styles.resendText, { color: colors.textMuted }]}>Didn't receive the code?</Text>
+              <Text style={[styles.resendText, { color: colors.textMuted }]}>Didn't receive code?</Text>
               <TouchableOpacity onPress={handleResendOtp} disabled={timer > 0 || loading}>
-                <Text
-                  style={[
-                    styles.resendLink,
-                    { color: timer > 0 ? colors.textMuted : colors.primary },
-                  ]}
-                >
+                <Text style={[styles.resendLink, { color: timer > 0 ? colors.textMuted : colors.primary }]}>
                   {timer > 0 ? `Resend in ${timer}s` : 'Resend Code'}
                 </Text>
               </TouchableOpacity>
@@ -537,7 +499,7 @@ export const RegisterScreen = ({ navigation }: any) => {
           </View>
         )}
 
-        {/* Action Controls */}
+        {/* Action Buttons */}
         <View style={styles.actionRow}>
           {step > 1 && (
             <TouchableOpacity
@@ -555,10 +517,7 @@ export const RegisterScreen = ({ navigation }: any) => {
           )}
 
           <TouchableOpacity
-            style={[
-              styles.nextButton,
-              { backgroundColor: colors.primary, flex: step === 1 ? 1 : 2 },
-            ]}
+            style={[styles.nextButton, { backgroundColor: colors.primary, flex: step === 1 ? 1 : 2 }]}
             onPress={handleNextStep}
             disabled={loading}
           >
@@ -567,10 +526,7 @@ export const RegisterScreen = ({ navigation }: any) => {
             ) : (
               <>
                 <Text style={styles.nextButtonText}>
-                  {step === 1 && 'Continue to Academic Details'}
-                  {step === 2 && 'Continue to Security'}
-                  {step === 3 && 'Send Verification Code'}
-                  {step === 4 && 'Verify & Launch KAMPUS'}
+                  {step === 3 ? 'Send Verification Code' : step === 4 ? 'Verify & Enter KAMPUS' : 'Next Step'}
                 </Text>
                 <ArrowRight size={18} color="#ffffff" style={{ marginLeft: 6 }} />
               </>
@@ -578,9 +534,9 @@ export const RegisterScreen = ({ navigation }: any) => {
           </TouchableOpacity>
         </View>
 
-        {/* Existing Member Link */}
+        {/* Footer Link */}
         <View style={styles.footerRow}>
-          <Text style={[styles.footerText, { color: colors.textSecondary }]}>Already have a KAMPUS account?</Text>
+          <Text style={[styles.footerText, { color: colors.textSecondary }]}>Already have a student account?</Text>
           <TouchableOpacity onPress={() => navigation.navigate('Login')}>
             <Text style={[styles.loginLink, { color: colors.primary }]}>Sign In</Text>
           </TouchableOpacity>
@@ -593,36 +549,40 @@ export const RegisterScreen = ({ navigation }: any) => {
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
-    padding: Spacing.lg,
+    padding: Spacing.xl,
     justifyContent: 'center',
   },
-  stepperContainer: {
+  header: {
+    alignItems: 'center',
     marginBottom: Spacing.lg,
   },
-  stepLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    marginBottom: Spacing.xs,
+  brandBadge: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.sm,
   },
-  progressTrack: {
-    height: 6,
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressBar: {
-    height: '100%',
-    borderRadius: 3,
-  },
-  title: {
+  brandTitle: {
     fontSize: 26,
-    fontWeight: '800',
-    marginBottom: Spacing.xs,
+    fontWeight: '900',
+    letterSpacing: 2,
   },
-  subtitle: {
-    fontSize: 14,
-    marginBottom: Spacing.lg,
-    lineHeight: 20,
+  brandSubtitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  dotsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.md,
+    gap: 6,
+  },
+  dot: {
+    height: 8,
+    borderRadius: 4,
   },
   alertBox: {
     padding: Spacing.md,
@@ -635,13 +595,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   formContainer: {
-    marginBottom: Spacing.lg,
+    width: '100%',
   },
   label: {
     fontSize: 13,
     fontWeight: '600',
-    marginBottom: Spacing.xs,
-    marginTop: Spacing.sm,
+    marginBottom: 6,
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -654,51 +613,16 @@ const styles = StyleSheet.create({
   inputIcon: {
     marginRight: Spacing.sm,
   },
-  eyeIcon: {
-    padding: Spacing.xs,
-  },
   input: {
     flex: 1,
     fontSize: 15,
   },
-  row: {
-    flexDirection: 'row',
+  eyeIcon: {
+    padding: 6,
   },
-  securityNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: Spacing.md,
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    marginTop: Spacing.md,
-  },
-  noticeText: {
-    fontSize: 12,
-    flex: 1,
-    lineHeight: 16,
-  },
-  emailSummaryCard: {
+  splitRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: Spacing.md,
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    marginBottom: Spacing.sm,
-  },
-  summaryLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-  },
-  summaryEmail: {
-    fontSize: 15,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  editEmailLink: {
-    fontSize: 13,
-    fontWeight: '600',
   },
   resendRow: {
     flexDirection: 'row',
@@ -715,40 +639,40 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: 'row',
-    gap: Spacing.sm,
-    marginTop: Spacing.md,
+    alignItems: 'center',
+    marginTop: Spacing.xl,
+    gap: Spacing.md,
   },
   backButton: {
     flex: 1,
     flexDirection: 'row',
-    height: 52,
-    borderWidth: 1,
-    borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.xs,
+    height: 50,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
   },
   backButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: 6,
   },
   nextButton: {
     flexDirection: 'row',
-    height: 52,
-    borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
+    height: 50,
+    borderRadius: BorderRadius.md,
   },
   nextButtonText: {
     color: '#ffffff',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
   },
   footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: Spacing.xs,
     marginTop: Spacing.xl,
   },
   footerText: {
@@ -756,6 +680,7 @@ const styles = StyleSheet.create({
   },
   loginLink: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
+    marginLeft: 6,
   },
 });

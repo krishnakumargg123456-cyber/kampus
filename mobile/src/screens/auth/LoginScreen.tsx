@@ -11,17 +11,16 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Eye, EyeOff, Mail, Lock, ShieldCheck, ArrowRight, Chrome } from 'lucide-react-native';
-import { useSignIn, useOAuth } from '@clerk/clerk-expo';
+import { useSignIn, useOAuth, useSSO } from '@clerk/clerk-expo';
 import * as WebBrowser from 'expo-web-browser';
+import * as AuthSession from 'expo-auth-session';
 import { useTheme } from '../../theme/ThemeContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
-
-// Complete pending auth sessions from browser redirects
-WebBrowser.maybeCompleteAuthSession();
 
 export const LoginScreen = ({ navigation }: any) => {
   const { colors, isDark } = useTheme();
   const { isLoaded: isSignInLoaded, signIn, setActive } = useSignIn();
+  const { startSSOFlow } = useSSO();
   const { startOAuthFlow } = useOAuth({ strategy: 'oauth_google' });
 
   const [activeTab, setActiveTab] = useState<'password' | 'otp'>('password');
@@ -35,6 +34,7 @@ export const LoginScreen = ({ navigation }: any) => {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [activeEmailAddressId, setActiveEmailAddressId] = useState<string | null>(null);
 
   const actionLock = useRef(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -81,7 +81,7 @@ export const LoginScreen = ({ navigation }: any) => {
     }
 
     if (!isSignInLoaded || !signIn) {
-      setErrorMessage('Authentication service initializing. Please retry.');
+      setErrorMessage('Authentication service initializing. Please retry in a moment.');
       return;
     }
 
@@ -95,8 +95,26 @@ export const LoginScreen = ({ navigation }: any) => {
       });
 
       if (result.status === 'complete') {
-        await setActive({ session: result.createdSessionId });
-        // Navigation automatically handled by RootNavigator observing isSignedIn
+        if (setActive) {
+          await setActive({ session: result.createdSessionId });
+        }
+      } else if (result.status === 'needs_first_factor') {
+        const factor: any = result.supportedFirstFactors?.find(
+          (f: any) => f.strategy === 'email_code'
+        );
+        if (factor) {
+          setActiveEmailAddressId(factor.emailAddressId);
+          await signIn.prepareFirstFactor({
+            strategy: 'email_code',
+            emailAddressId: factor.emailAddressId,
+          });
+          setActiveTab('otp');
+          setOtpSent(true);
+          startResendTimer();
+          setSuccessMessage(`Email verification required. A 6-digit code was sent to ${cleanEmail}`);
+        } else {
+          setErrorMessage(`Additional verification required (${result.status}).`);
+        }
       } else {
         setErrorMessage(`Login status: ${result.status}. Additional verification required.`);
       }
@@ -104,7 +122,7 @@ export const LoginScreen = ({ navigation }: any) => {
       const clerkErr = err.errors?.[0];
       if (clerkErr) {
         if (clerkErr.code === 'form_identifier_not_found') {
-          setErrorMessage('No student account found with this email. Please create one.');
+          setErrorMessage('No student account found with this email. Tap Register to create one.');
         } else if (clerkErr.code === 'form_password_incorrect') {
           setErrorMessage('Incorrect password. Please retry or use Forgot Password.');
         } else {
@@ -155,6 +173,8 @@ export const LoginScreen = ({ navigation }: any) => {
         return;
       }
 
+      setActiveEmailAddressId(emailFactor.emailAddressId);
+
       await signIn.prepareFirstFactor({
         strategy: 'email_code',
         emailAddressId: emailFactor.emailAddressId,
@@ -182,7 +202,49 @@ export const LoginScreen = ({ navigation }: any) => {
   };
 
   /**
-   * 3. Verify OTP and Complete Login via Clerk
+   * 3. Resend OTP on Active Sign-In Attempt (Fix for Bug 3)
+   */
+  const handleResendLoginOtp = async () => {
+    if (timer > 0 || loading || !isSignInLoaded || !signIn) return;
+    setErrorMessage('');
+    setSuccessMessage('');
+    setLoading(true);
+
+    try {
+      if (activeEmailAddressId && signIn.status === 'needs_first_factor') {
+        // Resend on active existing sign-in attempt without destroying state
+        await signIn.prepareFirstFactor({
+          strategy: 'email_code',
+          emailAddressId: activeEmailAddressId,
+        });
+      } else {
+        // Restart fresh sign-in attempt if previous expired
+        const cleanEmail = email.trim().toLowerCase();
+        const res = await signIn.create({ identifier: cleanEmail });
+        const emailFactor: any = res.supportedFirstFactors?.find(
+          (f: any) => f.strategy === 'email_code'
+        );
+        if (emailFactor) {
+          setActiveEmailAddressId(emailFactor.emailAddressId);
+          await signIn.prepareFirstFactor({
+            strategy: 'email_code',
+            emailAddressId: emailFactor.emailAddressId,
+          });
+        }
+      }
+
+      setSuccessMessage(`A fresh 6-digit code has been sent to ${email.trim()}`);
+      startResendTimer();
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      setErrorMessage(clerkErr?.longMessage || clerkErr?.message || 'Could not resend verification code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * 4. Verify OTP and Complete Login via Clerk
    */
   const handleVerifyOtp = async () => {
     if (actionLock.current || loading) return;
@@ -209,7 +271,9 @@ export const LoginScreen = ({ navigation }: any) => {
       });
 
       if (res.status === 'complete') {
-        await setActive({ session: res.createdSessionId });
+        if (setActive) {
+          await setActive({ session: res.createdSessionId });
+        }
       } else {
         setErrorMessage(`Verification status: ${res.status}.`);
       }
@@ -233,7 +297,7 @@ export const LoginScreen = ({ navigation }: any) => {
   };
 
   /**
-   * 4. Google Sign-In via Clerk
+   * 5. Google Sign-In via Clerk with Native Redirect (Fix for Bug 1)
    */
   const handleGoogleLogin = async () => {
     if (googleLoading) return;
@@ -241,13 +305,56 @@ export const LoginScreen = ({ navigation }: any) => {
     setGoogleLoading(true);
 
     try {
-      const { createdSessionId, setActive: setOAuthActive } = await startOAuthFlow();
-      if (createdSessionId && setOAuthActive) {
-        await setOAuthActive({ session: createdSessionId });
+      const redirectUrl = AuthSession.makeRedirectUri({
+        scheme: 'kampus',
+        path: 'oauth-native-callback',
+      });
+
+      // Prefer startSSOFlow if available, fallback to startOAuthFlow
+      let targetSessionId: string | null = null;
+      let targetSetActive = setActive;
+
+      if (startSSOFlow) {
+        const result = await startSSOFlow({
+          strategy: 'oauth_google',
+          redirectUrl,
+        });
+
+        targetSessionId =
+          result.createdSessionId ||
+          result.signIn?.createdSessionId ||
+          result.signUp?.createdSessionId ||
+          null;
+
+        if (result.setActive) targetSetActive = result.setActive;
+
+        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+          return;
+        }
+      } else {
+        const result = await startOAuthFlow({
+          redirectUrl,
+        });
+
+        targetSessionId =
+          result.createdSessionId ||
+          result.signIn?.createdSessionId ||
+          result.signUp?.createdSessionId ||
+          null;
+
+        if (result.setActive) targetSetActive = result.setActive;
+
+        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+          return;
+        }
+      }
+
+      if (targetSessionId && targetSetActive) {
+        await targetSetActive({ session: targetSessionId });
       }
     } catch (err: any) {
-      if (err.message && err.message.includes('dismissed')) {
-        // User voluntarily cancelled the Google prompt
+      if (err.message && (err.message.includes('dismissed') || err.message.includes('cancel'))) {
+        // User voluntarily closed the Google prompt
         return;
       }
       const clerkErr = err.errors?.[0];
@@ -255,7 +362,7 @@ export const LoginScreen = ({ navigation }: any) => {
         clerkErr?.longMessage ||
           clerkErr?.message ||
           err.message ||
-          'Google login requires Google provider to be enabled in Clerk Dashboard.'
+          'Google authentication requires Google OAuth provider configured in Clerk Dashboard.'
       );
     } finally {
       setGoogleLoading(false);
@@ -429,7 +536,7 @@ export const LoginScreen = ({ navigation }: any) => {
 
                   <View style={styles.resendRow}>
                     <Text style={[styles.resendText, { color: colors.textMuted }]}>Didn't receive code?</Text>
-                    <TouchableOpacity onPress={handleSendOtp} disabled={timer > 0 || loading}>
+                    <TouchableOpacity onPress={handleResendLoginOtp} disabled={timer > 0 || loading}>
                       <Text style={[styles.resendLink, { color: timer > 0 ? colors.textMuted : colors.primary }]}>
                         {timer > 0 ? `Resend in ${timer}s` : 'Resend Code'}
                       </Text>
@@ -459,29 +566,27 @@ export const LoginScreen = ({ navigation }: any) => {
             <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
           </View>
 
-          {/* Google Sign In Button */}
+          {/* Google Login Button */}
           <TouchableOpacity
             style={[styles.googleButton, { backgroundColor: colors.surface, borderColor: colors.border }]}
             onPress={handleGoogleLogin}
-            disabled={googleLoading}
+            disabled={googleLoading || loading}
           >
             {googleLoading ? (
               <ActivityIndicator color={colors.primary} />
             ) : (
               <>
-                <View style={styles.googleIconContainer}>
-                  <Text style={{ fontSize: 18, fontWeight: '800', color: '#4285F4' }}>G</Text>
-                </View>
+                <Chrome size={20} color="#ea4335" style={{ marginRight: 10 }} />
                 <Text style={[styles.googleButtonText, { color: colors.text }]}>Continue with Google</Text>
               </>
             )}
           </TouchableOpacity>
 
-          {/* Registration Link */}
+          {/* Registration Redirect Footer */}
           <View style={styles.footerRow}>
-            <Text style={[styles.footerText, { color: colors.textSecondary }]}>New to KAMPUS?</Text>
+            <Text style={[styles.footerText, { color: colors.textSecondary }]}>New to KAMPUS student life?</Text>
             <TouchableOpacity onPress={() => navigation.navigate('Register')}>
-              <Text style={[styles.registerLink, { color: colors.primary }]}>Create Student Account</Text>
+              <Text style={[styles.registerLink, { color: colors.primary }]}>Create Account</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -493,7 +598,7 @@ export const LoginScreen = ({ navigation }: any) => {
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
-    padding: Spacing.lg,
+    padding: Spacing.xl,
     justifyContent: 'center',
   },
   header: {
@@ -503,39 +608,39 @@ const styles = StyleSheet.create({
   brandBadge: {
     width: 60,
     height: 60,
-    borderRadius: BorderRadius.xl,
+    borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: Spacing.sm,
   },
   brandTitle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '900',
     letterSpacing: 2,
   },
   brandSubtitle: {
-    fontSize: 14,
-    marginTop: 2,
+    fontSize: Typography.bodyMedium.fontSize,
+    marginTop: 4,
   },
   tabContainer: {
     flexDirection: 'row',
     borderRadius: BorderRadius.lg,
+    padding: 4,
     borderWidth: 1,
-    padding: 3,
     marginBottom: Spacing.lg,
   },
   tabButton: {
     flex: 1,
-    paddingVertical: Spacing.sm,
+    paddingVertical: 10,
     alignItems: 'center',
     borderRadius: BorderRadius.md,
   },
   activeTab: {
-    elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
     shadowRadius: 2,
+    elevation: 2,
   },
   tabText: {
     fontSize: 13,
@@ -552,23 +657,23 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   formContainer: {
-    marginBottom: Spacing.lg,
+    width: '100%',
   },
   label: {
     fontSize: 13,
     fontWeight: '600',
-    marginBottom: Spacing.xs,
+    marginBottom: 6,
   },
   passwordLabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginTop: Spacing.md,
-    marginBottom: Spacing.xs,
   },
   forgotLink: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 6,
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -577,29 +682,41 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.md,
     paddingHorizontal: Spacing.md,
     height: 50,
-    marginBottom: Spacing.xs,
   },
   inputIcon: {
     marginRight: Spacing.sm,
-  },
-  eyeIcon: {
-    padding: Spacing.xs,
   },
   input: {
     flex: 1,
     fontSize: 15,
   },
+  eyeIcon: {
+    padding: 6,
+  },
   submitButton: {
     flexDirection: 'row',
-    height: 52,
-    borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
+    height: 50,
+    borderRadius: BorderRadius.md,
     marginTop: Spacing.lg,
   },
   submitButtonText: {
     color: '#ffffff',
     fontSize: 15,
+    fontWeight: '700',
+  },
+  resendRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: Spacing.sm,
+  },
+  resendText: {
+    fontSize: 13,
+  },
+  resendLink: {
+    fontSize: 13,
     fontWeight: '700',
   },
   dividerRow: {
@@ -612,50 +729,27 @@ const styles = StyleSheet.create({
     height: 1,
   },
   dividerText: {
+    marginHorizontal: Spacing.md,
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
-    marginHorizontal: Spacing.md,
   },
   googleButton: {
     flexDirection: 'row',
-    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 50,
     borderRadius: BorderRadius.md,
     borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.sm,
-  },
-  googleIconContainer: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   googleButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  resendRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: Spacing.sm,
-    marginBottom: Spacing.sm,
-  },
-  resendText: {
-    fontSize: 13,
-  },
-  resendLink: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
   footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: Spacing.xs,
     marginTop: Spacing.xl,
   },
   footerText: {
@@ -663,6 +757,7 @@ const styles = StyleSheet.create({
   },
   registerLink: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
+    marginLeft: 6,
   },
 });

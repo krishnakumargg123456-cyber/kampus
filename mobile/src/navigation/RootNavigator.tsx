@@ -1,7 +1,5 @@
 import React from 'react';
-import { View, ActivityIndicator, StyleSheet, Text } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { ShieldCheck } from 'lucide-react-native';
 import { TabNavigator } from './TabNavigator';
 import { LoginScreen } from '../screens/auth/LoginScreen';
 import { RegisterScreen } from '../screens/auth/RegisterScreen';
@@ -18,25 +16,11 @@ import { KampusIdScreen } from '../screens/id/KampusIdScreen';
 import { SettingsScreen } from '../screens/settings/SettingsScreen';
 import { AdminDashboardScreen } from '../screens/admin/AdminDashboardScreen';
 import { useAuth } from '../context/AuthContext';
-import { useTheme } from '../theme/ThemeContext';
 
 const Stack = createNativeStackNavigator();
 
 export const RootNavigator = () => {
-  const { isAuthenticated, isLoading } = useAuth();
-  const { colors } = useTheme();
-
-  if (isLoading) {
-    return (
-      <View style={[styles.loadingContainer, { backgroundColor: colors.background }]}>
-        <View style={[styles.logoBadge, { backgroundColor: colors.primaryLight }]}>
-          <ShieldCheck size={36} color={colors.primary} />
-        </View>
-        <Text style={[styles.loadingTitle, { color: colors.text }]}>KAMPUS</Text>
-        <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 24 }} />
-      </View>
-    );
-  }
+  const { isAuthenticated } = useAuth();
 
   return (
     <Stack.Navigator screenOptions={{ headerShown: false, animation: 'slide_from_right' }}>
@@ -67,24 +51,3 @@ export const RootNavigator = () => {
     </Stack.Navigator>
   );
 };
-
-const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoBadge: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  loadingTitle: {
-    fontSize: 26,
-    fontWeight: '900',
-    letterSpacing: 2,
-  },
-});

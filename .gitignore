@@ -38,3 +38,10 @@ kampus_icon_temp/
 *.tmp
 .expo/
 mobile/.expo/
+mobile/dist/
+*.bak
+mobile/src_backup_clerk/
+mobile/*backup*/
+*_backup_*/
+
+

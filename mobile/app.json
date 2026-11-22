@@ -7,7 +7,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -41,6 +41,7 @@
       "expo-secure-store"
     ],
     "extra": {
+      "clerkPublishableKey": "pk_test_b3JpZW50ZWQtamVubmV0LTU5NDUuY2xlcmsuYWNjb3VudHMuZGV2JA",
       "eas": {
         "projectId": "13acd386-0e49-44ab-aed0-6e93a334e132"
       }

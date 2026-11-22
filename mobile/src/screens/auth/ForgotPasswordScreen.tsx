@@ -10,7 +10,7 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
-import { Mail, Lock, ShieldCheck, ArrowRight, ArrowLeft, KeyRound, Eye, EyeOff, CheckCircle2 } from 'lucide-react-native';
+import { Mail, Lock, KeyRound, Eye, EyeOff, ShieldCheck, ArrowRight, ArrowLeft } from 'lucide-react-native';
 import { useSignIn } from '@clerk/clerk-expo';
 import { useTheme } from '../../theme/ThemeContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
@@ -99,6 +99,33 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
   };
 
   /**
+   * Resend Reset Code safely
+   */
+  const handleResendResetCode = async () => {
+    if (timer > 0 || loading || !isSignInLoaded || !signIn) return;
+    setErrorMessage('');
+    setSuccessMessage('');
+    setLoading(true);
+
+    try {
+      const cleanEmail = email.trim().toLowerCase();
+      // Re-prepare or recreate reset code
+      await signIn.create({
+        strategy: 'reset_password_email_code',
+        identifier: cleanEmail,
+      });
+
+      setSuccessMessage(`A fresh reset code has been dispatched to ${cleanEmail}`);
+      startResendTimer();
+    } catch (err: any) {
+      const clerkErr = err.errors?.[0];
+      setErrorMessage(clerkErr?.longMessage || clerkErr?.message || 'Could not resend code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
    * Step 2: Verify Code and Set New Password via Clerk
    */
   const handleResetPassword = async () => {
@@ -136,7 +163,9 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
 
       if (result.status === 'complete') {
         // Automatically activate session with new password
-        await setActive({ session: result.createdSessionId });
+        if (setActive) {
+          await setActive({ session: result.createdSessionId });
+        }
       } else {
         setSuccessMessage('Password reset successfully! Please sign in with your new password.');
         setTimeout(() => {
@@ -178,7 +207,7 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
           <Text style={[styles.brandSubtitle, { color: colors.textSecondary }]}>
             {step === 1
               ? 'Enter your student email to receive a password recovery code.'
-              : `Enter the 6-digit code and create your new secure password.`}
+              : `Enter the 6-digit code sent to ${email} and set your new password.`}
           </Text>
         </View>
 
@@ -233,10 +262,7 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <ShieldCheck size={18} color={colors.primary} style={styles.inputIcon} />
               <TextInput
-                style={[
-                  styles.input,
-                  { color: colors.text, letterSpacing: 6, fontSize: 18, fontWeight: '700' },
-                ]}
+                style={[styles.input, { color: colors.text, letterSpacing: 6, fontSize: 18, fontWeight: '700' }]}
                 placeholder="• • • • • •"
                 placeholderTextColor={colors.textMuted}
                 value={code}
@@ -248,19 +274,19 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
 
             <View style={styles.resendRow}>
               <Text style={[styles.resendText, { color: colors.textMuted }]}>Didn't receive code?</Text>
-              <TouchableOpacity onPress={handleSendResetCode} disabled={timer > 0 || loading}>
+              <TouchableOpacity onPress={handleResendResetCode} disabled={timer > 0 || loading}>
                 <Text style={[styles.resendLink, { color: timer > 0 ? colors.textMuted : colors.primary }]}>
                   {timer > 0 ? `Resend in ${timer}s` : 'Resend Code'}
                 </Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>New Password</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>New Password (Min 8 chars)</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="At least 8 characters"
+                placeholder="Enter new password"
                 placeholderTextColor={colors.textMuted}
                 value={newPassword}
                 onChangeText={setNewPassword}
@@ -273,10 +299,10 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
 
             <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm New Password</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <ShieldCheck size={18} color={colors.textMuted} style={styles.inputIcon} />
+              <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="Retype new password"
+                placeholder="Confirm new password"
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
@@ -296,7 +322,7 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
                 <ActivityIndicator color="#ffffff" />
               ) : (
                 <>
-                  <Text style={styles.submitButtonText}>Reset Password & Login</Text>
+                  <Text style={styles.submitButtonText}>Reset Password & Log In</Text>
                   <ArrowRight size={18} color="#ffffff" style={{ marginLeft: 6 }} />
                 </>
               )}
@@ -304,13 +330,13 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
           </View>
         )}
 
-        {/* Return to Login */}
+        {/* Back to Login */}
         <TouchableOpacity
-          style={styles.backToLoginRow}
+          style={[styles.backRow, { borderColor: colors.border }]}
           onPress={() => navigation.navigate('Login')}
         >
-          <ArrowLeft size={16} color={colors.primary} />
-          <Text style={[styles.backToLoginText, { color: colors.primary }]}>Back to Login</Text>
+          <ArrowLeft size={16} color={colors.textSecondary} />
+          <Text style={[styles.backText, { color: colors.textSecondary }]}>Return to Login</Text>
         </TouchableOpacity>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -320,7 +346,7 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
-    padding: Spacing.lg,
+    padding: Spacing.xl,
     justifyContent: 'center',
   },
   header: {
@@ -330,21 +356,21 @@ const styles = StyleSheet.create({
   brandBadge: {
     width: 60,
     height: 60,
-    borderRadius: BorderRadius.xl,
+    borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: Spacing.sm,
   },
   brandTitle: {
-    fontSize: 26,
-    fontWeight: '800',
+    fontSize: 24,
+    fontWeight: '900',
+    letterSpacing: 1.5,
   },
   brandSubtitle: {
-    fontSize: 14,
+    fontSize: Typography.bodyMedium.fontSize,
     textAlign: 'center',
-    marginTop: 4,
+    marginTop: 6,
     lineHeight: 20,
-    paddingHorizontal: Spacing.md,
   },
   alertBox: {
     padding: Spacing.md,
@@ -357,12 +383,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   formContainer: {
-    marginBottom: Spacing.lg,
+    width: '100%',
   },
   label: {
     fontSize: 13,
     fontWeight: '600',
-    marginBottom: Spacing.xs,
+    marginBottom: 6,
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -375,12 +401,12 @@ const styles = StyleSheet.create({
   inputIcon: {
     marginRight: Spacing.sm,
   },
-  eyeIcon: {
-    padding: Spacing.xs,
-  },
   input: {
     flex: 1,
     fontSize: 15,
+  },
+  eyeIcon: {
+    padding: 6,
   },
   resendRow: {
     flexDirection: 'row',
@@ -397,26 +423,26 @@ const styles = StyleSheet.create({
   },
   submitButton: {
     flexDirection: 'row',
-    height: 52,
-    borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: Spacing.xl,
+    height: 50,
+    borderRadius: BorderRadius.md,
+    marginTop: Spacing.lg,
   },
   submitButtonText: {
     color: '#ffffff',
     fontSize: 15,
     fontWeight: '700',
   },
-  backToLoginRow: {
+  backRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.xs,
+    alignItems: 'center',
     marginTop: Spacing.xl,
   },
-  backToLoginText: {
+  backText: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '600',
+    marginLeft: 6,
   },
 });
