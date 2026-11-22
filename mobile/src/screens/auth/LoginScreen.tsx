@@ -351,6 +351,8 @@ export const LoginScreen = ({ navigation }: any) => {
 
       if (targetSessionId && targetSetActive) {
         await targetSetActive({ session: targetSessionId });
+      } else {
+        setErrorMessage('Google authentication succeeded, but Clerk requires additional fields (e.g. Phone Number). In Clerk Dashboard under User & Authentication > Email, phone, username, set Phone number to Optional.');
       }
     } catch (err: any) {
       if (err.message && (err.message.includes('dismissed') || err.message.includes('cancel'))) {

@@ -231,7 +231,12 @@ export const RegisterScreen = ({ navigation }: any) => {
             enrollmentNo: enrollmentNo.trim(),
           });
         } else {
-          setErrorMessage(`Verification status: ${completeSignUp.status}. Please check your details.`);
+          const missing = (completeSignUp as any)?.missingFields || (signUp as any)?.missingFields;
+          if (missing && missing.includes('phone_number')) {
+            setErrorMessage('Email verified! However, Clerk Dashboard requires Phone Number. In Clerk Dashboard under User & Authentication > Email, phone, username, set Phone number to Optional.');
+          } else {
+            setErrorMessage(`Verification status: ${completeSignUp.status}. ${missing?.length ? `Missing: ${missing.join(', ')}` : 'Please check your details.'}`);
+          }
         }
       } catch (err: any) {
         const clerkErr = err.errors?.[0];
