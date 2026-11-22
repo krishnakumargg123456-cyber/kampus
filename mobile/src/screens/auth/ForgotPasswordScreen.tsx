@@ -14,6 +14,11 @@ import { Mail, Lock, KeyRound, Eye, EyeOff, ShieldCheck, ArrowRight, ArrowLeft }
 import { useSignIn } from '@clerk/clerk-expo';
 import { useTheme } from '../../theme/ThemeContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
+import {
+  PasswordRequirementsView,
+  validatePassword,
+  parseClerkAuthError,
+} from '../../components/common/PasswordRequirementsView';
 
 export const ForgotPasswordScreen = ({ navigation }: any) => {
   const { colors } = useTheme();
@@ -138,13 +143,14 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
       return;
     }
 
-    if (!newPassword || newPassword.length < 8) {
-      setErrorMessage('New password must be at least 8 characters long.');
+    const validation = validatePassword(newPassword);
+    if (!validation.isValid) {
+      setErrorMessage(validation.firstMissingError || 'Please meet all password requirements.');
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setErrorMessage('Passwords do not match.');
+      setErrorMessage('Passwords do not match. Please retype carefully.');
       return;
     }
 
@@ -173,20 +179,7 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
         }, 1500);
       }
     } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      if (clerkErr) {
-        if (clerkErr.code === 'form_code_incorrect') {
-          setErrorMessage('Incorrect verification code. Please check your email.');
-        } else if (clerkErr.code === 'verification_expired') {
-          setErrorMessage('Verification code has expired. Please tap Resend Code.');
-        } else if (clerkErr.code === 'form_password_pwned') {
-          setErrorMessage('This password was detected in a public leak. Please choose a more unique password.');
-        } else {
-          setErrorMessage(clerkErr.longMessage || clerkErr.message || 'Password reset failed.');
-        }
-      } else {
-        setErrorMessage(err.message || 'Password reset failed. Please retry.');
-      }
+      setErrorMessage(parseClerkAuthError(err));
     } finally {
       setLoading(false);
     }
@@ -281,34 +274,45 @@ export const ForgotPasswordScreen = ({ navigation }: any) => {
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>New Password (Min 8 chars)</Text>
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>New Password *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="Enter new password"
+                placeholder="Enter new password (e.g. campus2026)"
                 placeholderTextColor={colors.textMuted}
                 value={newPassword}
-                onChangeText={setNewPassword}
+                onChangeText={(val) => {
+                  setNewPassword(val);
+                  if (errorMessage) setErrorMessage('');
+                }}
                 secureTextEntry={!showPassword}
+                autoCapitalize="none"
               />
-              <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+              <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle password visibility">
                 {showPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm New Password</Text>
+            {/* Live Requirements Checklist & Strength Meter */}
+            <PasswordRequirementsView password={newPassword} showStrength={true} />
+
+            <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm New Password *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="Confirm new password"
+                placeholder="Re-enter your new password"
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                onChangeText={(val) => {
+                  setConfirmPassword(val);
+                  if (errorMessage) setErrorMessage('');
+                }}
                 secureTextEntry={!showConfirmPassword}
+                autoCapitalize="none"
               />
-              <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.eyeIcon}>
+              <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle confirm password visibility">
                 {showConfirmPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>

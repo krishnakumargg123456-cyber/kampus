@@ -28,6 +28,11 @@ import { useSignUp } from '@clerk/clerk-expo';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
+import {
+  PasswordRequirementsView,
+  validatePassword,
+  parseClerkAuthError,
+} from '../../components/common/PasswordRequirementsView';
 
 export const RegisterScreen = ({ navigation }: any) => {
   const { colors } = useTheme();
@@ -120,8 +125,9 @@ export const RegisterScreen = ({ navigation }: any) => {
 
     // STEP 3: CREATE CLERK ACCOUNT & SEND OTP
     if (step === 3) {
-      if (!password || password.length < 8) {
-        setErrorMessage('Password must be at least 8 characters long for security.');
+      const validation = validatePassword(password);
+      if (!validation.isValid) {
+        setErrorMessage(validation.firstMissingError || 'Please meet all password requirements.');
         return;
       }
       if (password !== confirmPassword) {
@@ -169,20 +175,7 @@ export const RegisterScreen = ({ navigation }: any) => {
         setStep(4);
         startResendTimer();
       } catch (err: any) {
-        const clerkErr = err.errors?.[0];
-        if (clerkErr) {
-          if (clerkErr.code === 'form_identifier_exists') {
-            setErrorMessage('An account with this email already exists. Please log in.');
-          } else if (clerkErr.code === 'form_password_pwned') {
-            setErrorMessage('This password was detected in a public leak. Please choose a more unique password.');
-          } else if (clerkErr.code === 'form_password_length_too_short') {
-            setErrorMessage('Password must be at least 8 characters long.');
-          } else {
-            setErrorMessage(clerkErr.longMessage || clerkErr.message || 'Registration failed.');
-          }
-        } else {
-          setErrorMessage(err.message || 'Could not complete registration. Please retry.');
-        }
+        setErrorMessage(parseClerkAuthError(err));
       } finally {
         setLoading(false);
         actionLock.current = false;
@@ -440,21 +433,28 @@ export const RegisterScreen = ({ navigation }: any) => {
         {/* STEP 3: PASSWORD & SECURITY */}
         {step === 3 && (
           <View style={styles.formContainer}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Create Password (Min 8 chars) *</Text>
+            <Text style={[styles.label, { color: colors.textSecondary }]}>Create Password *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
-                placeholder="Choose a strong password"
+                placeholder="Choose a password (e.g. campus2026)"
                 placeholderTextColor={colors.textMuted}
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={(val) => {
+                  setPassword(val);
+                  if (errorMessage) setErrorMessage('');
+                }}
                 secureTextEntry={!showPassword}
+                autoCapitalize="none"
               />
-              <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+              <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle password visibility">
                 {showPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>
+
+            {/* Live Requirements Checklist & Strength Meter */}
+            <PasswordRequirementsView password={password} showStrength={true} />
 
             <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm Password *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -464,10 +464,14 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="Re-enter your password"
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                onChangeText={(val) => {
+                  setConfirmPassword(val);
+                  if (errorMessage) setErrorMessage('');
+                }}
                 secureTextEntry={!showConfirmPassword}
+                autoCapitalize="none"
               />
-              <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.eyeIcon}>
+              <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle confirm password visibility">
                 {showConfirmPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>

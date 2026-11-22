@@ -16,6 +16,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as AuthSession from 'expo-auth-session';
 import { useTheme } from '../../theme/ThemeContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
+import { parseClerkAuthError } from '../../components/common/PasswordRequirementsView';
 
 export const LoginScreen = ({ navigation }: any) => {
   const { colors, isDark } = useTheme();
@@ -119,18 +120,7 @@ export const LoginScreen = ({ navigation }: any) => {
         setErrorMessage(`Login status: ${result.status}. Additional verification required.`);
       }
     } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      if (clerkErr) {
-        if (clerkErr.code === 'form_identifier_not_found') {
-          setErrorMessage('No student account found with this email. Tap Register to create one.');
-        } else if (clerkErr.code === 'form_password_incorrect') {
-          setErrorMessage('Incorrect password. Please retry or use Forgot Password.');
-        } else {
-          setErrorMessage(clerkErr.longMessage || clerkErr.message || 'Login failed.');
-        }
-      } else {
-        setErrorMessage(err.message || 'Login failed. Please check your credentials.');
-      }
+      setErrorMessage(parseClerkAuthError(err));
     } finally {
       setLoading(false);
       actionLock.current = false;
@@ -480,10 +470,14 @@ export const LoginScreen = ({ navigation }: any) => {
                   placeholder="Enter your secret password"
                   placeholderTextColor={colors.textMuted}
                   value={password}
-                  onChangeText={setPassword}
+                  onChangeText={(val) => {
+                    setPassword(val);
+                    if (errorMessage) setErrorMessage('');
+                  }}
                   secureTextEntry={!showPassword}
+                  autoCapitalize="none"
                 />
-                <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+                <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle password visibility">
                   {showPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
                 </TouchableOpacity>
               </View>

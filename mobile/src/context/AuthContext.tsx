@@ -6,6 +6,7 @@ import {
   useSignUp,
 } from '@clerk/clerk-expo';
 import API_BASE_URL from '../config/api';
+import { parseClerkAuthError } from '../components/common/PasswordRequirementsView';
 
 export interface StudentUser {
   userId: string;
@@ -239,17 +240,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return { success: false, error: `Login status: ${result.status}` };
     } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      if (clerkErr) {
-        if (clerkErr.code === 'form_identifier_not_found') {
-          return { success: false, error: 'No student account found with this email. Please register.' };
-        }
-        if (clerkErr.code === 'form_password_incorrect') {
-          return { success: false, error: 'Incorrect password. Please verify and try again.' };
-        }
-        return { success: false, error: clerkErr.longMessage || clerkErr.message || 'Login failed.' };
-      }
-      return { success: false, error: err.message || 'Login failed. Please check your credentials.' };
+      return { success: false, error: parseClerkAuthError(err) };
     } finally {
       setIsInternalLoading(false);
     }
@@ -407,8 +398,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       return { success: true, message: 'Password reset code sent to your email.' };
     } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Password reset request failed.' };
+      return { success: false, error: parseClerkAuthError(err) };
     } finally {
       setIsInternalLoading(false);
     }
@@ -439,8 +429,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return { success: true, message: 'Password updated. Please sign in.' };
     } catch (err: any) {
-      const clerkErr = err.errors?.[0];
-      return { success: false, error: clerkErr?.longMessage || clerkErr?.message || err.message || 'Password reset failed.' };
+      return { success: false, error: parseClerkAuthError(err) };
     } finally {
       setIsInternalLoading(false);
     }
