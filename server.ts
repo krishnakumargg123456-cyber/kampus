@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { createServer as createHttpServer } from 'http';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import JSZip from 'jszip';
 import { GoogleGenAI, Type, type Part } from '@google/genai';
@@ -147,6 +148,13 @@ async function startServer() {
   const httpServer = createHttpServer(app);
   app.use(cors());
   app.use(express.json({ limit: '16mb' }));
+
+  // Serve static uploads for study materials, attachments, and student docs
+  const uploadsDir = path.join(process.cwd(), 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  app.use('/uploads', express.static(uploadsDir));
 
   // Initialize production database & schema
   await initializeDatabase();

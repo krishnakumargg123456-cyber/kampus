@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,753 +6,568 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Image,
-  Modal,
-  Alert,
+  ActivityIndicator,
+  RefreshControl,
+  StatusBar,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  BookOpen,
-  Search,
-  Download,
-  Star,
   FileText,
-  Upload,
-  CheckCircle2,
-  Clock,
-  Filter,
-  Bookmark,
-  Share2,
+  FolderDown,
+  ListTodo,
+  Calendar,
+  Award,
+  TrendingUp,
+  Search,
   ArrowRight,
-  HelpCircle,
+  Clock,
+  CheckCircle2,
+  AlertCircle,
+  Zap,
+  Sparkles,
+  ChevronRight,
 } from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
 import { useTheme } from '../../theme/ThemeContext';
-import { Spacing, BorderRadius, Typography, Shadows } from '../../theme/tokens';
+import { useAuth } from '../../context/AuthContext';
+import { studyHubApi, StudyOverviewData } from '../../services/studyHubApi';
 
 export const StudyHubScreen = () => {
+  const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
   const { colors, isDark } = useTheme();
+  const { token, user } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<'notes' | 'pyq' | 'practice' | 'upload'>('notes');
+  const [overview, setOverview] = useState<StudyOverviewData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedSemester, setSelectedSemester] = useState('All');
-  const [downloadedCount, setDownloadedCount] = useState<Record<string, number>>({});
-  const [savedNotes, setSavedNotes] = useState<string[]>(['note_1']);
-  const [uploadModalVisible, setUploadModalVisible] = useState(false);
-  const [uploadSuccess, setUploadSuccess] = useState(false);
 
-  // Form states for upload
-  const [uploadTitle, setUploadTitle] = useState('');
-  const [uploadSubject, setUploadSubject] = useState('');
-  const [uploadCategory, setUploadCategory] = useState('PDF Notes');
-
-  const SUBJECTS = [
-    { id: 'sub_1', name: 'Data Structures & Algorithms', code: 'CS301', notes: 42, color: '#3b82f6' },
-    { id: 'sub_2', name: 'Database Management Systems', code: 'CS302', notes: 35, color: '#10b981' },
-    { id: 'sub_3', name: 'Operating Systems & Architecture', code: 'CS303', notes: 28, color: '#8b5cf6' },
-    { id: 'sub_4', name: 'Computer Networks & Protocols', code: 'CS304', notes: 31, color: '#f59e0b' },
-    { id: 'sub_5', name: 'Artificial Intelligence & Neural Nets', code: 'CS305', notes: 49, color: '#ec4899' },
-  ];
-
-  const NOTES_LIST = [
-    {
-      id: 'note_1',
-      title: 'Complete Graph Algorithms & Dynamic Programming Cheatsheet',
-      subject: 'Data Structures & Algorithms',
-      semester: 'Semester 4',
-      author: 'Aarav Gupta (IITB Alumni)',
-      downloads: 1420,
-      rating: 4.9,
-      size: '4.2 MB',
-      type: 'PDF',
-    },
-    {
-      id: 'note_2',
-      title: 'DBMS Normalization (1NF to BCNF) & SQL Transactions Masterclass',
-      subject: 'Database Management Systems',
-      semester: 'Semester 5',
-      author: 'Prof. S. R. Kulkarni',
-      downloads: 980,
-      rating: 4.8,
-      size: '2.8 MB',
-      type: 'PDF',
-    },
-    {
-      id: 'note_3',
-      title: 'Operating Systems: CPU Scheduling, Virtual Memory & Deadlocks',
-      subject: 'Operating Systems',
-      semester: 'Semester 5',
-      author: 'Priya Sharma (Rank 1)',
-      downloads: 1250,
-      rating: 4.95,
-      size: '5.1 MB',
-      type: 'PDF',
-    },
-    {
-      id: 'note_4',
-      title: 'Computer Networks: TCP/IP Stack, Subnetting & Socket Programming',
-      subject: 'Computer Networks',
-      semester: 'Semester 6',
-      author: 'Vikram Mehta',
-      downloads: 740,
-      rating: 4.7,
-      size: '3.4 MB',
-      type: 'PDF',
-    },
-  ];
-
-  const PYQ_LIST = [
-    {
-      id: 'pyq_1',
-      title: 'Mid-Sem Examination 2025 – Algorithms & Complexity',
-      year: '2025',
-      college: 'IIT Bombay',
-      subject: 'CS301',
-      solutionsIncluded: true,
-    },
-    {
-      id: 'pyq_2',
-      title: 'End-Sem Final Examination 2024 – Distributed Systems',
-      year: '2024',
-      college: 'IIT Delhi',
-      subject: 'CS402',
-      solutionsIncluded: true,
-    },
-    {
-      id: 'pyq_3',
-      title: 'Gate CS 10-Year Subjectwise Solved Question Bank',
-      year: '2015-2025',
-      college: 'All IITs Joint',
-      subject: 'Core CS',
-      solutionsIncluded: true,
-    },
-  ];
-
-  const handleDownload = (id: string, title: string) => {
-    setDownloadedCount((prev) => ({
-      ...prev,
-      [id]: (prev[id] || 0) + 1,
-    }));
-    Alert.alert('Download Started', `Downloading "${title}" to your device storage.`);
-  };
-
-  const toggleBookmark = (id: string) => {
-    setSavedNotes((prev) =>
-      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
-    );
-  };
-
-  const handleUploadSubmit = () => {
-    if (!uploadTitle.trim() || !uploadSubject.trim()) {
-      Alert.alert('Incomplete Form', 'Please enter a title and select a subject.');
-      return;
+  const loadOverview = useCallback(async () => {
+    try {
+      const data = await studyHubApi.getOverview(token, user?.userId);
+      setOverview(data);
+    } catch (err: any) {
+      console.warn('Failed to load study overview:', err.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-    setUploadSuccess(true);
-    setTimeout(() => {
-      setUploadSuccess(false);
-      setUploadModalVisible(false);
-      setUploadTitle('');
-      setUploadSubject('');
-      Alert.alert('Upload Approved', 'Your study material has been verified and added to the Campus Library!');
-    }, 1200);
+  }, [token, user?.userId]);
+
+  useEffect(() => {
+    loadOverview();
+  }, [loadOverview]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadOverview();
   };
+
+  const bg = isDark ? '#080d1a' : '#f8fafc';
+  const cardBg = isDark ? '#11192d' : '#ffffff';
+  const cardBorder = isDark ? 'rgba(255, 255, 255, 0.08)' : '#e2e8f0';
+  const textPrimary = isDark ? '#f8fafc' : '#0f172a';
+  const textSecondary = isDark ? '#94a3b8' : '#64748b';
+
+  const SIX_MODULES = [
+    {
+      id: 'notes',
+      title: 'My Notes',
+      subtitle: 'Personal notes, formulas & cheatsheets',
+      route: 'StudyNotes',
+      countText: `${overview?.notesCount ?? 0} Saved`,
+      icon: FileText,
+      color: '#38bdf8',
+      bgLight: 'rgba(56, 189, 248, 0.12)',
+    },
+    {
+      id: 'materials',
+      title: 'Study Materials',
+      subtitle: 'Syllabus, PYQs, slides & textbooks',
+      route: 'StudyMaterials',
+      countText: `${overview?.materialsCount ?? 0} Docs`,
+      icon: FolderDown,
+      color: '#10b981',
+      bgLight: 'rgba(16, 185, 129, 0.12)',
+    },
+    {
+      id: 'assignments',
+      title: 'Assignments & Tasks',
+      subtitle: 'Coursework deadlines & priorities',
+      route: 'StudyAssignments',
+      countText: `${overview?.pendingAssignmentsCount ?? 0} Due`,
+      icon: ListTodo,
+      color: '#f59e0b',
+      bgLight: 'rgba(245, 158, 11, 0.12)',
+    },
+    {
+      id: 'planner',
+      title: 'Study Planner',
+      subtitle: 'Daily focus timetable & study slots',
+      route: 'StudyPlanner',
+      countText: `${overview?.todaySessionsCount ?? 0} Today`,
+      icon: Calendar,
+      color: '#8b5cf6',
+      bgLight: 'rgba(139, 92, 246, 0.12)',
+    },
+    {
+      id: 'quiz',
+      title: 'Quiz & Practice',
+      subtitle: 'Mock tests, auto-grading & review',
+      route: 'StudyQuiz',
+      countText: `${overview?.totalQuizAttempts ?? 0} Tests`,
+      icon: Award,
+      color: '#ec4899',
+      bgLight: 'rgba(236, 72, 153, 0.12)',
+    },
+    {
+      id: 'progress',
+      title: 'Study Progress',
+      subtitle: 'Activity feed & academic metrics',
+      route: 'StudyProgress',
+      countText: `${overview?.averageQuizScore ?? 0}% Avg`,
+      icon: TrendingUp,
+      color: '#06b6d4',
+      bgLight: 'rgba(6, 182, 212, 0.12)',
+    },
+  ];
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
+    <View style={[styles.container, { backgroundColor: bg, paddingTop: insets.top }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
+
       {/* Top Header */}
-      <View style={[styles.header, { backgroundColor: colors.surface, borderBottomColor: colors.borderLight }]}>
+      <View style={[styles.header, { borderBottomColor: cardBorder }]}>
         <View>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Study Hub</Text>
-          <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>
-            University Study Library, PYQs & Practice Tests
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={[styles.uploadButton, { backgroundColor: colors.primary }]}
-          onPress={() => setUploadModalVisible(true)}
-        >
-          <Upload size={16} color="#ffffff" />
-          <Text style={styles.uploadButtonText}>Upload Notes</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Tabs */}
-      <View style={[styles.tabBar, { backgroundColor: colors.surface, borderBottomColor: colors.borderLight }]}>
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'notes' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
-          onPress={() => setActiveTab('notes')}
-        >
-          <Text style={[styles.tabLabel, { color: activeTab === 'notes' ? colors.primary : colors.textMuted }]}>
-            Shared Notes
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'pyq' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
-          onPress={() => setActiveTab('pyq')}
-        >
-          <Text style={[styles.tabLabel, { color: activeTab === 'pyq' ? colors.primary : colors.textMuted }]}>
-            Previous Papers (PYQ)
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'practice' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
-          onPress={() => setActiveTab('practice')}
-        >
-          <Text style={[styles.tabLabel, { color: activeTab === 'practice' ? colors.primary : colors.textMuted }]}>
-            Practice Tests
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
-        {/* Search & Semester Filters */}
-        <View style={[styles.searchBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-          <Search size={18} color={colors.textMuted} />
-          <TextInput
-            style={[styles.searchInput, { color: colors.text }]}
-            placeholder="Search notes by topic, author, or subject..."
-            placeholderTextColor={colors.textMuted}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-          />
-        </View>
-
-        {/* Subjects Carousel */}
-        <View style={styles.sectionHeader}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Featured Subjects</Text>
-        </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.subjectRow}>
-          {SUBJECTS.map((sub) => (
-            <TouchableOpacity
-              key={sub.id}
-              style={[
-                styles.subjectCard,
-                { backgroundColor: colors.surface, borderColor: colors.border },
-                Shadows.card,
-              ]}
-            >
-              <View style={[styles.subjectColorBar, { backgroundColor: sub.color }]} />
-              <Text style={[styles.subjectCode, { color: colors.primary }]}>{sub.code}</Text>
-              <Text style={[styles.subjectName, { color: colors.text }]} numberOfLines={2}>
-                {sub.name}
-              </Text>
-              <Text style={[styles.subjectNotesCount, { color: colors.textMuted }]}>
-                {sub.notes} verified documents
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-
-        {/* Content based on Active Tab */}
-        {activeTab === 'notes' && (
-          <View style={{ marginTop: Spacing.md }}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Verified Study Materials</Text>
-              <Text style={[styles.sectionCount, { color: colors.textMuted }]}>{NOTES_LIST.length} Resources</Text>
+          <View style={styles.brandRow}>
+            <Text style={[styles.brandText, { color: '#38bdf8' }]}>KAMPUS</Text>
+            <View style={styles.proPill}>
+              <Text style={styles.proText}>STUDY HUB</Text>
             </View>
-
-            {NOTES_LIST.map((note) => {
-              const isSaved = savedNotes.includes(note.id);
-              const extraDownloads = downloadedCount[note.id] || 0;
-              return (
-                <View
-                  key={note.id}
-                  style={[
-                    styles.noteCard,
-                    { backgroundColor: colors.surface, borderColor: colors.border },
-                    Shadows.card,
-                  ]}
-                >
-                  <View style={styles.noteTopRow}>
-                    <View style={[styles.pdfBadge, { backgroundColor: colors.primaryLight }]}>
-                      <FileText size={16} color={colors.primary} />
-                      <Text style={[styles.pdfBadgeText, { color: colors.primary }]}>{note.type}</Text>
-                    </View>
-                    <View style={styles.noteMetaRight}>
-                      <View style={styles.ratingRow}>
-                        <Star size={14} color="#f59e0b" fill="#f59e0b" />
-                        <Text style={[styles.ratingText, { color: colors.text }]}>{note.rating}</Text>
-                      </View>
-                      <TouchableOpacity onPress={() => toggleBookmark(note.id)}>
-                        <Bookmark
-                          size={18}
-                          color={isSaved ? colors.primary : colors.textMuted}
-                          fill={isSaved ? colors.primary : 'transparent'}
-                        />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-
-                  <Text style={[styles.noteTitle, { color: colors.text }]}>{note.title}</Text>
-                  <Text style={[styles.noteAuthor, { color: colors.textSecondary }]}>
-                    {note.subject} • {note.author}
-                  </Text>
-
-                  <View style={[styles.noteFooter, { borderTopColor: colors.borderLight }]}>
-                    <Text style={[styles.noteSize, { color: colors.textMuted }]}>
-                      {note.size} • {note.downloads + extraDownloads} downloads
-                    </Text>
-                    <TouchableOpacity
-                      style={[styles.downloadBtn, { backgroundColor: colors.primary }]}
-                      onPress={() => handleDownload(note.id, note.title)}
-                    >
-                      <Download size={14} color="#ffffff" />
-                      <Text style={styles.downloadBtnText}>Download PDF</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              );
-            })}
           </View>
-        )}
+          <Text style={[styles.headerSubtitle, { color: textSecondary }]}>
+            Your complete academic command center
+          </Text>
+        </View>
 
-        {activeTab === 'pyq' && (
-          <View style={{ marginTop: Spacing.md }}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Previous Year Question Papers</Text>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('StudyProgress')}
+          style={[styles.headerProgressBtn, { backgroundColor: cardBg, borderColor: cardBorder }]}
+        >
+          <TrendingUp size={18} color="#38bdf8" />
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#38bdf8" />}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Quick Search Bar */}
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => navigation.navigate('StudyNotes')}
+          style={[styles.searchBox, { backgroundColor: cardBg, borderColor: cardBorder }]}
+        >
+          <Search size={18} color={textSecondary} />
+          <Text style={[styles.searchPlaceholder, { color: textSecondary }]}>
+            Search notes, syllabus, assignments...
+          </Text>
+        </TouchableOpacity>
+
+        {/* Live Academic Momentum Card */}
+        <View style={[styles.summaryCard, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+          <View style={styles.summaryTopRow}>
+            <View>
+              <Text style={[styles.summaryGreeting, { color: textSecondary }]}>
+                {user?.fullName ? `Welcome back, ${user.fullName.split(' ')[0]}` : 'Welcome back'}
+              </Text>
+              <Text style={[styles.summaryTitle, { color: textPrimary }]}>Today's Study Status</Text>
             </View>
+            <View style={styles.summaryIconCircle}>
+              <Zap size={20} color="#f59e0b" fill="#f59e0b" />
+            </View>
+          </View>
 
-            {PYQ_LIST.map((pyq) => (
-              <View
-                key={pyq.id}
+          <View style={styles.metricsGrid}>
+            <View style={styles.metricBlock}>
+              <Text style={[styles.metricVal, { color: '#38bdf8' }]}>
+                {overview?.notesCount ?? 0}
+              </Text>
+              <Text style={[styles.metricLabel, { color: textSecondary }]}>Notes</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricBlock}>
+              <Text style={[styles.metricVal, { color: '#f59e0b' }]}>
+                {overview?.pendingAssignmentsCount ?? 0}
+              </Text>
+              <Text style={[styles.metricLabel, { color: textSecondary }]}>Pending</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricBlock}>
+              <Text style={[styles.metricVal, { color: '#8b5cf6' }]}>
+                {overview?.todaySessionsCount ?? 0}
+              </Text>
+              <Text style={[styles.metricLabel, { color: textSecondary }]}>Sessions</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricBlock}>
+              <Text style={[styles.metricVal, { color: '#10b981' }]}>
+                {overview?.averageQuizScore ?? 0}%
+              </Text>
+              <Text style={[styles.metricLabel, { color: textSecondary }]}>Quiz Avg</Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Six Core Modules Section */}
+        <View style={styles.sectionHeaderRow}>
+          <Text style={[styles.sectionHeading, { color: textPrimary }]}>Core Modules</Text>
+          <Text style={[styles.sectionSub, { color: textSecondary }]}>Verified & Functional</Text>
+        </View>
+
+        <View style={styles.modulesGrid}>
+          {SIX_MODULES.map((item) => {
+            const IconComp = item.icon;
+            return (
+              <TouchableOpacity
+                key={item.id}
+                activeOpacity={0.8}
+                onPress={() => navigation.navigate(item.route)}
                 style={[
-                  styles.pyqCard,
-                  { backgroundColor: colors.surface, borderColor: colors.border },
-                  Shadows.card,
+                  styles.moduleCard,
+                  { backgroundColor: cardBg, borderColor: cardBorder },
                 ]}
               >
-                <View style={styles.pyqHeader}>
-                  <Text style={[styles.pyqSubject, { color: colors.primary }]}>{pyq.subject} • {pyq.college}</Text>
-                  <Text style={[styles.pyqYear, { color: colors.textMuted }]}>{pyq.year}</Text>
-                </View>
-                <Text style={[styles.pyqTitle, { color: colors.text }]}>{pyq.title}</Text>
-                <View style={styles.pyqFooter}>
-                  <View style={[styles.solutionsTag, { backgroundColor: colors.success + '20' }]}>
-                    <CheckCircle2 size={12} color={colors.success} />
-                    <Text style={[styles.solutionsText, { color: colors.success }]}>With Detailed Solutions</Text>
+                <View style={styles.moduleCardTop}>
+                  <View style={[styles.moduleIconBox, { backgroundColor: item.bgLight }]}>
+                    <IconComp size={22} color={item.color} />
                   </View>
-                  <TouchableOpacity
-                    style={[styles.downloadBtn, { backgroundColor: colors.primary }]}
-                    onPress={() => handleDownload(pyq.id, pyq.title)}
-                  >
-                    <Download size={14} color="#ffffff" />
-                    <Text style={styles.downloadBtnText}>View PYQ</Text>
-                  </TouchableOpacity>
+                  <View style={[styles.countPill, { backgroundColor: item.bgLight }]}>
+                    <Text style={[styles.countPillText, { color: item.color }]}>{item.countText}</Text>
+                  </View>
                 </View>
+
+                <Text style={[styles.moduleTitle, { color: textPrimary }]}>{item.title}</Text>
+                <Text style={[styles.moduleSubtitle, { color: textSecondary }]} numberOfLines={2}>
+                  {item.subtitle}
+                </Text>
+
+                <View style={styles.moduleFooter}>
+                  <Text style={[styles.openText, { color: item.color }]}>Open Module</Text>
+                  <ArrowRight size={14} color={item.color} />
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* Urgent Assignments Alert (if any pending) */}
+        {overview?.urgentAssignments && overview.urgentAssignments.length > 0 && (
+          <View style={[styles.urgentSection, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+            <View style={styles.urgentHeader}>
+              <View style={styles.urgentTitleWrap}>
+                <AlertCircle size={18} color="#ef4444" />
+                <Text style={[styles.urgentTitle, { color: textPrimary }]}>Urgent Coursework</Text>
               </View>
+              <TouchableOpacity onPress={() => navigation.navigate('StudyAssignments')}>
+                <Text style={styles.seeAllText}>View All</Text>
+              </TouchableOpacity>
+            </View>
+
+            {overview.urgentAssignments.slice(0, 2).map((asgn) => (
+              <TouchableOpacity
+                key={asgn.id}
+                onPress={() => navigation.navigate('StudyAssignments')}
+                style={[styles.urgentItem, { borderTopColor: cardBorder }]}
+              >
+                <View style={styles.urgentItemLeft}>
+                  <Text style={[styles.urgentItemTitle, { color: textPrimary }]} numberOfLines={1}>
+                    {asgn.title}
+                  </Text>
+                  <Text style={[styles.urgentItemSub, { color: textSecondary }]}>
+                    {asgn.subject} • Due {asgn.dueDate}
+                  </Text>
+                </View>
+                <View style={[styles.urgentPriorityBadge, { backgroundColor: 'rgba(239, 68, 68, 0.15)' }]}>
+                  <Text style={styles.urgentPriorityText}>{asgn.priority}</Text>
+                </View>
+              </TouchableOpacity>
             ))}
           </View>
         )}
 
-        {activeTab === 'practice' && (
-          <View style={{ marginTop: Spacing.md }}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Adaptive Mock Tests</Text>
-            </View>
-
-            <View style={[styles.practiceBanner, { backgroundColor: colors.secondary }]}>
-              <Text style={styles.practiceBannerTitle}>GATE & Semester Practice Arena</Text>
-              <Text style={styles.practiceBannerSub}>
-                Timed MCQ assessments curated by subject toppers with real-time score ranking.
-              </Text>
-              <TouchableOpacity
-                style={[styles.startTestBtn, { backgroundColor: colors.accent }]}
-                onPress={() => Alert.alert('Test Initiated', 'Good luck! 30 Questions - 45 Minutes timer started.')}
-              >
-                <Text style={styles.startTestBtnText}>Launch 30-Min Test</Text>
-                <ArrowRight size={16} color="#000000" />
+        {/* Today's Study Sessions (if any scheduled) */}
+        {overview?.todaySessions && overview.todaySessions.length > 0 && (
+          <View style={[styles.urgentSection, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+            <View style={styles.urgentHeader}>
+              <View style={styles.urgentTitleWrap}>
+                <Clock size={18} color="#38bdf8" />
+                <Text style={[styles.urgentTitle, { color: textPrimary }]}>Today's Focus Slots</Text>
+              </View>
+              <TouchableOpacity onPress={() => navigation.navigate('StudyPlanner')}>
+                <Text style={styles.seeAllText}>View Timetable</Text>
               </TouchableOpacity>
             </View>
+
+            {overview.todaySessions.map((sess) => (
+              <TouchableOpacity
+                key={sess.id}
+                onPress={() => navigation.navigate('StudyPlanner')}
+                style={[styles.urgentItem, { borderTopColor: cardBorder }]}
+              >
+                <View style={styles.urgentItemLeft}>
+                  <Text style={[styles.urgentItemTitle, { color: textPrimary }]} numberOfLines={1}>
+                    {sess.topic}
+                  </Text>
+                  <Text style={[styles.urgentItemSub, { color: textSecondary }]}>
+                    {sess.subject} • {sess.startTime} - {sess.endTime}
+                  </Text>
+                </View>
+                <ChevronRight size={18} color={textSecondary} />
+              </TouchableOpacity>
+            ))}
           </View>
         )}
       </ScrollView>
-
-      {/* Upload Notes Modal */}
-      <Modal visible={uploadModalVisible} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
-            <Text style={[styles.modalTitle, { color: colors.text }]}>Share Study Material</Text>
-            <Text style={[styles.modalSubtitle, { color: colors.textSecondary }]}>
-              Help fellow scholars. Upload handwritten notes, summaries, or formula sheets.
-            </Text>
-
-            <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Document Title</Text>
-            <TextInput
-              style={[styles.modalInput, { backgroundColor: colors.surfaceElevated, color: colors.text, borderColor: colors.border }]}
-              placeholder="e.g. Unit 3 OS Memory Management Notes"
-              placeholderTextColor={colors.textMuted}
-              value={uploadTitle}
-              onChangeText={setUploadTitle}
-            />
-
-            <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Subject / Course</Text>
-            <TextInput
-              style={[styles.modalInput, { backgroundColor: colors.surfaceElevated, color: colors.text, borderColor: colors.border }]}
-              placeholder="e.g. CS303 Operating Systems"
-              placeholderTextColor={colors.textMuted}
-              value={uploadSubject}
-              onChangeText={setUploadSubject}
-            />
-
-            <View style={[styles.fakeUploadBox, { borderColor: colors.primary, backgroundColor: colors.primaryLight + '40' }]}>
-              <Upload size={24} color={colors.primary} />
-              <Text style={[styles.fakeUploadText, { color: colors.primary }]}>
-                PDF Document Selected: (Notes_Unit3_verified.pdf)
-              </Text>
-            </View>
-
-            <View style={styles.modalButtonsRow}>
-              <TouchableOpacity
-                style={[styles.modalCancelBtn, { borderColor: colors.border }]}
-                onPress={() => setUploadModalVisible(false)}
-              >
-                <Text style={[styles.modalCancelText, { color: colors.textSecondary }]}>Cancel</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.modalSubmitBtn, { backgroundColor: colors.primary }]}
-                onPress={handleUploadSubmit}
-              >
-                <Text style={styles.modalSubmitText}>Submit for Approval</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
   header: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.md,
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
   },
-  headerTitle: {
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  brandText: {
     fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+  },
+  proPill: {
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  proText: {
+    color: '#38bdf8',
+    fontSize: 10,
     fontWeight: '800',
-    letterSpacing: -0.4,
+    letterSpacing: 0.5,
   },
   headerSubtitle: {
     fontSize: 12,
     marginTop: 2,
   },
-  uploadButton: {
-    flexDirection: 'row',
+  headerProgressBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: BorderRadius.md,
+    justifyContent: 'center',
+    borderWidth: 1,
   },
-  uploadButtonText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  tabBar: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-  },
-  tabItem: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
-  },
-  activeTabItem: {
-    borderBottomWidth: 2,
-  },
-  tabLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  contentContainer: {
-    padding: Spacing.md,
-    paddingBottom: Spacing.xxl,
+  scrollContent: {
+    padding: 16,
+    gap: 16,
   },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingHorizontal: 14,
+    height: 46,
+    borderRadius: 12,
     borderWidth: 1,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: Spacing.md,
-    height: 44,
-    marginBottom: Spacing.md,
+    gap: 10,
   },
-  searchInput: {
-    flex: 1,
-    fontSize: 14,
-    marginLeft: Spacing.sm,
+  searchPlaceholder: {
+    fontSize: 13,
   },
-  sectionHeader: {
+  summaryCard: {
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    elevation: 2,
+  },
+  summaryTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: Spacing.sm,
+    marginBottom: 16,
   },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
+  summaryGreeting: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
   },
-  sectionCount: {
+  summaryTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  summaryIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  metricBlock: {
+    alignItems: 'center',
+  },
+  metricVal: {
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  metricLabel: {
+    fontSize: 11,
+    marginTop: 3,
+  },
+  metricDivider: {
+    width: 1,
+    height: 26,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginTop: 4,
+  },
+  sectionHeading: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  sectionSub: {
     fontSize: 12,
   },
-  subjectRow: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-    paddingBottom: Spacing.sm,
+  modulesGrid: {
+    gap: 12,
   },
-  subjectCard: {
-    width: 160,
-    borderRadius: BorderRadius.md,
+  moduleCard: {
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
-    padding: Spacing.md,
-    position: 'relative',
-    overflow: 'hidden',
+    elevation: 2,
   },
-  subjectColorBar: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 4,
+  moduleCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
   },
-  subjectCode: {
+  moduleIconBox: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+  },
+  countPillText: {
     fontSize: 11,
     fontWeight: '800',
-    marginTop: 4,
   },
-  subjectName: {
-    fontSize: 13,
+  moduleTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  moduleSubtitle: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 12,
+  },
+  moduleFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  openText: {
+    fontSize: 12,
     fontWeight: '700',
-    marginTop: 4,
-    lineHeight: 18,
   },
-  subjectNotesCount: {
-    fontSize: 11,
-    marginTop: 8,
-  },
-  noteCard: {
-    borderRadius: BorderRadius.md,
+  urgentSection: {
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
   },
-  noteTopRow: {
+  urgentHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
   },
-  pdfBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: BorderRadius.sm,
-  },
-  pdfBadgeText: {
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  noteMetaRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  ratingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  ratingText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  noteTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 20,
-    marginBottom: 4,
-  },
-  noteAuthor: {
-    fontSize: 12,
-    marginBottom: Spacing.sm,
-  },
-  noteFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderTopWidth: 1,
-    paddingTop: Spacing.sm,
-  },
-  noteSize: {
-    fontSize: 11,
-  },
-  downloadBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: BorderRadius.sm,
-  },
-  downloadBtnText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  pyqCard: {
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  pyqHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  pyqSubject: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  pyqYear: {
-    fontSize: 12,
-  },
-  pyqTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    marginBottom: Spacing.sm,
-  },
-  pyqFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  solutionsTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: BorderRadius.sm,
-  },
-  solutionsText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  practiceBanner: {
-    borderRadius: BorderRadius.lg,
-    padding: Spacing.lg,
-  },
-  practiceBannerTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 6,
-  },
-  practiceBannerSub: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
-    marginBottom: Spacing.md,
-  },
-  startTestBtn: {
+  urgentTitleWrap: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: BorderRadius.md,
   },
-  startTestBtnText: {
-    color: '#0f172a',
-    fontSize: 14,
-    fontWeight: '800',
+  urgentTitle: {
+    fontSize: 15,
+    fontWeight: '700',
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalCard: {
-    borderTopLeftRadius: BorderRadius.xl,
-    borderTopRightRadius: BorderRadius.xl,
-    padding: Spacing.lg,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 4,
-  },
-  modalSubtitle: {
-    fontSize: 13,
-    marginBottom: Spacing.md,
-  },
-  inputLabel: {
+  seeAllText: {
     fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 4,
-    marginTop: 8,
+    color: '#38bdf8',
+    fontWeight: '700',
   },
-  modalInput: {
-    borderWidth: 1,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: Spacing.md,
-    height: 44,
-    fontSize: 14,
-  },
-  fakeUploadBox: {
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderRadius: BorderRadius.md,
-    padding: Spacing.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: Spacing.md,
-    gap: 6,
-  },
-  fakeUploadText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  modalButtonsRow: {
+  urgentItem: {
     flexDirection: 'row',
-    gap: Spacing.sm,
-    marginTop: Spacing.lg,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderTopWidth: 1,
   },
-  modalCancelBtn: {
+  urgentItemLeft: {
     flex: 1,
-    height: 44,
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingRight: 8,
   },
-  modalCancelText: {
-    fontSize: 14,
-    fontWeight: '600',
+  urgentItemTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 2,
   },
-  modalSubmitBtn: {
-    flex: 2,
-    height: 44,
-    borderRadius: BorderRadius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
+  urgentItemSub: {
+    fontSize: 11,
   },
-  modalSubmitText: {
-    color: '#ffffff',
-    fontSize: 14,
+  urgentPriorityBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  urgentPriorityText: {
+    color: '#ef4444',
+    fontSize: 10,
     fontWeight: '700',
   },
 });
