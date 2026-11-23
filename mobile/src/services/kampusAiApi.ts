@@ -47,22 +47,22 @@ export interface AiConversation {
 }
 
 export interface AiServiceStatus {
-  success: boolean;
-  available: boolean;
-  primaryProvider: string;
-  fallbackEnabled: boolean;
-  providers: {
-    openai: { configured: boolean; model: string };
-    gemini: { configured: boolean; model: string };
+  success?: boolean;
+  available?: boolean;
+  primaryProvider?: string;
+  fallbackEnabled?: boolean;
+  providers?: {
+    openai?: { configured?: boolean; model?: string };
+    gemini?: { configured?: boolean; model?: string };
   };
-  webSearchEnabled: boolean;
-  studyModeEnabled: boolean;
-  userQuota: {
-    requestsToday: number;
-    dailyLimit: number;
-    remaining: number;
+  webSearchEnabled?: boolean;
+  studyModeEnabled?: boolean;
+  userQuota?: {
+    requestsToday?: number;
+    dailyLimit?: number;
+    remaining?: number;
   };
-  message: string;
+  message?: string;
 }
 
 function getHeaders(token?: string | null, userId?: string | null): Record<string, string> {

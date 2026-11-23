@@ -378,9 +378,11 @@ export const KampusAiScreen = () => {
               <Text style={styles.headerTitleText}>
                 {activeConversation ? activeConversation.title : 'KAMPUS AI'}
               </Text>
-              {aiStatus?.providers.openai.configured && (
+              {Boolean(aiStatus?.providers?.openai?.configured || aiStatus?.providers?.gemini?.configured) && (
                 <View style={styles.activeModelBadge}>
-                  <Text style={styles.activeModelText}>GPT-4o Mini</Text>
+                  <Text style={styles.activeModelText}>
+                    {aiStatus?.providers?.openai?.configured ? 'GPT-4o Mini' : 'Gemini'}
+                  </Text>
                 </View>
               )}
             </View>
