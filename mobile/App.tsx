@@ -6,6 +6,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { ClerkProvider } from '@clerk/clerk-expo';
 import { tokenCache } from '@clerk/clerk-expo/token-cache';
 import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
 import Constants from 'expo-constants';
 import { ShieldCheck } from 'lucide-react-native';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
@@ -15,6 +16,17 @@ import { ErrorBoundary } from './src/components/common/ErrorBoundary';
 
 // Handle OAuth browser redirects at the top-level module entry
 WebBrowser.maybeCompleteAuthSession();
+
+// Listen to incoming deep links to complete auth session if Android backgrounded/cold-started
+Linking.addEventListener('url', (event) => {
+  if (event?.url && (event.url.includes('oauth') || event.url.includes('callback') || event.url.includes('kampus://'))) {
+    try {
+      WebBrowser.maybeCompleteAuthSession();
+    } catch {
+      // safe fallback
+    }
+  }
+});
 
 const CLERK_PUBLISHABLE_KEY =
   process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ||

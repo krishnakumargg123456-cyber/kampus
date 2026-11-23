@@ -43,11 +43,23 @@ export interface AiAttachment {
   base64Data?: string;
 }
 
+export interface AiCitation {
+  id: string;
+  title: string;
+  url: string;
+  domain: string;
+  snippet?: string;
+}
+
 export interface AiChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  provider?: string;
+  model?: string;
+  fallbackUsed?: boolean;
+  citations?: AiCitation[];
   attachments?: Array<{ fileName: string; kind: string }>;
   error?: boolean;
   followUps?: string[];

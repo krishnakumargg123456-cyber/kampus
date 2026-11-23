@@ -1,5 +1,6 @@
 import {
   AiAttachment,
+  AiCitation,
   AiLanguage,
   AiLearningLevel,
   AiResponseStyle,
@@ -97,13 +98,24 @@ export async function uploadAndExtractDocument(file: File): Promise<AiAttachment
 
 export async function sendAiChatMessage(params: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
-  language: AiLanguage;
-  learningLevel: AiLearningLevel;
-  responseStyle: AiResponseStyle;
+  language?: AiLanguage;
+  learningLevel?: AiLearningLevel;
+  responseStyle?: AiResponseStyle;
   studentContext?: string;
   attachments?: AiAttachment[];
+  conversationId?: string;
+  mode?: 'normal' | 'study';
+  webSearch?: boolean;
   signal?: AbortSignal;
-}): Promise<{ reply: string; model: string }> {
+}): Promise<{
+  reply: string;
+  content: string;
+  model: string;
+  provider: string;
+  fallbackUsed?: boolean;
+  citations?: AiCitation[];
+  conversationId?: string;
+}> {
   const res = await fetch('/api/ai/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -114,6 +126,9 @@ export async function sendAiChatMessage(params: {
       learningLevel: params.learningLevel,
       responseStyle: params.responseStyle,
       studentContext: params.studentContext,
+      conversationId: params.conversationId,
+      mode: params.mode,
+      webSearch: params.webSearch,
       attachments: (params.attachments || []).map((a) => ({
         fileName: a.fileName,
         mimeType: a.mimeType,

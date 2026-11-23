@@ -287,7 +287,7 @@ export const LoginScreen = ({ navigation }: any) => {
   };
 
   /**
-   * 5. Google Sign-In via Clerk with Native Redirect (Fix for Bug 1)
+   * 5. Google Sign-In via Clerk with Native Redirect & Device Compatibility Fallback
    */
   const handleGoogleLogin = async () => {
     if (googleLoading) return;
@@ -295,37 +295,61 @@ export const LoginScreen = ({ navigation }: any) => {
     setGoogleLoading(true);
 
     try {
+      // Use standardized kampus scheme redirect URL
       const redirectUrl = AuthSession.makeRedirectUri({
         scheme: 'kampus',
         path: 'oauth-native-callback',
       });
 
-      // Prefer startSSOFlow if available, fallback to startOAuthFlow
       let targetSessionId: string | null = null;
       let targetSetActive = setActive;
+      let flowSucceeded = false;
 
+      // 1. Try SSO Flow (modern Clerk SDK standard)
       if (startSSOFlow) {
-        const result = await startSSOFlow({
-          strategy: 'oauth_google',
-          redirectUrl,
-        });
+        try {
+          const result = await startSSOFlow({
+            strategy: 'oauth_google',
+            redirectUrl,
+            authSessionOptions: {
+              showInRecents: false,
+            },
+          });
 
-        targetSessionId =
-          result.createdSessionId ||
-          result.signIn?.createdSessionId ||
-          result.signUp?.createdSessionId ||
-          null;
+          if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+            return;
+          }
 
-        if (result.setActive) targetSetActive = result.setActive;
+          targetSessionId =
+            result.createdSessionId ||
+            result.signIn?.createdSessionId ||
+            result.signUp?.createdSessionId ||
+            null;
 
-        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
-          return;
+          if (result.setActive) targetSetActive = result.setActive;
+          if (targetSessionId) flowSucceeded = true;
+        } catch (ssoErr: any) {
+          // If user voluntarily closed or cancelled, do not trigger fallback or error
+          if (ssoErr?.message && (ssoErr.message.includes('dismissed') || ssoErr.message.includes('cancel'))) {
+            return;
+          }
+          // Log non-sensitive flow info and proceed to OAuth fallback
+          if (__DEV__) {
+            console.log('[Auth] SSO flow error, falling back to OAuth flow:', ssoErr?.message || ssoErr);
+          }
         }
-      } else {
+      }
+
+      // 2. Fallback to startOAuthFlow if SSO did not yield a session
+      if (!flowSucceeded && startOAuthFlow) {
         const result = await startOAuthFlow({
           redirectUrl,
         });
 
+        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+          return;
+        }
+
         targetSessionId =
           result.createdSessionId ||
           result.signIn?.createdSessionId ||
@@ -333,27 +357,26 @@ export const LoginScreen = ({ navigation }: any) => {
           null;
 
         if (result.setActive) targetSetActive = result.setActive;
-
-        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
-          return;
-        }
+        if (targetSessionId) flowSucceeded = true;
       }
 
       if (targetSessionId && targetSetActive) {
         await targetSetActive({ session: targetSessionId });
-      } else {
-        setErrorMessage('Google authentication succeeded, but Clerk requires additional fields (e.g. Phone Number). In Clerk Dashboard under User & Authentication > Email, phone, username, set Phone number to Optional.');
+      } else if (!targetSessionId) {
+        setErrorMessage(
+          'Google authentication finished, but additional profile details may be required. Please sign in with email or check Clerk Dashboard settings.'
+        );
       }
     } catch (err: any) {
-      if (err.message && (err.message.includes('dismissed') || err.message.includes('cancel'))) {
+      if (err?.message && (err.message.includes('dismissed') || err.message.includes('cancel'))) {
         // User voluntarily closed the Google prompt
         return;
       }
-      const clerkErr = err.errors?.[0];
+      const clerkErr = err?.errors?.[0];
       setErrorMessage(
         clerkErr?.longMessage ||
           clerkErr?.message ||
-          err.message ||
+          err?.message ||
           'Google authentication requires Google OAuth provider configured in Clerk Dashboard.'
       );
     } finally {

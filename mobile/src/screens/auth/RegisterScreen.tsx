@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,10 +21,14 @@ import {
   EyeOff,
   ShieldCheck,
   CheckCircle2,
+  AlertCircle,
   ArrowRight,
   ArrowLeft,
+  Chrome,
 } from 'lucide-react-native';
-import { useSignUp } from '@clerk/clerk-expo';
+import { useSignUp, useSignIn, useOAuth, useSSO } from '@clerk/clerk-expo';
+import * as WebBrowser from 'expo-web-browser';
+import * as AuthSession from 'expo-auth-session';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import { Spacing, BorderRadius, Typography } from '../../theme/tokens';
@@ -38,9 +42,12 @@ export const RegisterScreen = ({ navigation }: any) => {
   const { colors } = useTheme();
   const { isLoaded: isSignUpLoaded, signUp, setActive } = useSignUp();
   const { syncBackendProfile } = useAuth();
+  const { startSSOFlow } = useSSO();
+  const { startOAuthFlow } = useOAuth({ strategy: 'oauth_google' });
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
@@ -69,8 +76,36 @@ export const RegisterScreen = ({ navigation }: any) => {
   const actionLock = useRef(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Single authoritative password validation evaluation
+  const passwordValidation = useMemo(() => validatePassword(password), [password]);
+  const isPasswordValid = passwordValidation.isValid;
+  const isConfirmMatch = confirmPassword.length > 0 && password === confirmPassword;
+  const isConfirmMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+  const canSubmitStep3 = isPasswordValid && isConfirmMatch;
+
+  // Real-time reactive error clearing: dismiss stale password validation errors immediately as requirements are met
   useEffect(() => {
+    if (
+      errorMessage &&
+      isPasswordValid &&
+      /character|letter|number|password requirement|must contain/i.test(errorMessage)
+    ) {
+      setErrorMessage('');
+    }
+  }, [isPasswordValid, errorMessage]);
+
+  // Real-time reactive error clearing: dismiss password mismatch error immediately when passwords match
+  useEffect(() => {
+    if (errorMessage && isConfirmMatch && /match/i.test(errorMessage)) {
+      setErrorMessage('');
+    }
+  }, [isConfirmMatch, errorMessage]);
+
+  useEffect(() => {
+    // Warm up the browser on Android for Google OAuth
+    void WebBrowser.warmUpAsync();
     return () => {
+      void WebBrowser.coolDownAsync();
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
@@ -87,6 +122,100 @@ export const RegisterScreen = ({ navigation }: any) => {
         return prev - 1;
       });
     }, 1000);
+  };
+
+  /**
+   * Google Sign-Up via Clerk with Native Redirect & Multi-device Fallback
+   */
+  const handleGoogleSignUp = async () => {
+    if (googleLoading || loading) return;
+    setErrorMessage('');
+    setGoogleLoading(true);
+
+    try {
+      const redirectUrl = AuthSession.makeRedirectUri({
+        scheme: 'kampus',
+        path: 'oauth-native-callback',
+      });
+
+      let targetSessionId: string | null = null;
+      let targetSetActive = setActive;
+      let flowSucceeded = false;
+
+      // 1. Try SSO Flow
+      if (startSSOFlow) {
+        try {
+          const result = await startSSOFlow({
+            strategy: 'oauth_google',
+            redirectUrl,
+            authSessionOptions: {
+              showInRecents: false,
+            },
+          });
+
+          if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+            return;
+          }
+
+          targetSessionId =
+            result.createdSessionId ||
+            result.signIn?.createdSessionId ||
+            result.signUp?.createdSessionId ||
+            null;
+
+          if (result.setActive) targetSetActive = result.setActive;
+          if (targetSessionId) flowSucceeded = true;
+        } catch (ssoErr: any) {
+          if (ssoErr?.message && (ssoErr.message.includes('dismissed') || ssoErr.message.includes('cancel'))) {
+            return;
+          }
+          if (__DEV__) {
+            console.log('[Auth] SSO flow error on sign-up, falling back to OAuth flow:', ssoErr?.message || ssoErr);
+          }
+        }
+      }
+
+      // 2. Fallback to startOAuthFlow
+      if (!flowSucceeded && startOAuthFlow) {
+        const result = await startOAuthFlow({
+          redirectUrl,
+        });
+
+        if (result.authSessionResult?.type === 'cancel' || result.authSessionResult?.type === 'dismiss') {
+          return;
+        }
+
+        targetSessionId =
+          result.createdSessionId ||
+          result.signIn?.createdSessionId ||
+          result.signUp?.createdSessionId ||
+          null;
+
+        if (result.setActive) targetSetActive = result.setActive;
+        if (targetSessionId) flowSucceeded = true;
+      }
+
+      if (targetSessionId && targetSetActive) {
+        await targetSetActive({ session: targetSessionId });
+      } else if (!targetSessionId) {
+        setErrorMessage(
+          'Google authentication completed, but additional profile information is needed. Please register using the form.'
+        );
+      }
+    } catch (err: any) {
+      if (err?.message && (err.message.includes('dismissed') || err.message.includes('cancel'))) {
+        return;
+      }
+      const clerkErr = err?.errors?.[0];
+      setErrorMessage(
+        clerkErr?.longMessage ||
+          clerkErr?.message ||
+          err?.message ||
+          'Google authentication requires Google OAuth provider configured in Clerk Dashboard.'
+      );
+    } finally {
+      setGoogleLoading(false);
+    }
   };
 
   const handleNextStep = async () => {
@@ -125,9 +254,8 @@ export const RegisterScreen = ({ navigation }: any) => {
 
     // STEP 3: CREATE CLERK ACCOUNT & SEND OTP
     if (step === 3) {
-      const validation = validatePassword(password);
-      if (!validation.isValid) {
-        setErrorMessage(validation.firstMissingError || 'Please meet all password requirements.');
+      if (!passwordValidation.isValid) {
+        setErrorMessage(passwordValidation.firstMissingError || 'Please meet all password requirements.');
         return;
       }
       if (password !== confirmPassword) {
@@ -302,7 +430,7 @@ export const RegisterScreen = ({ navigation }: any) => {
           </View>
         </View>
 
-        {/* Alerts */}
+        {/* Alerts: Automatically cleared when criteria are satisfied */}
         {errorMessage ? (
           <View style={[styles.alertBox, { backgroundColor: colors.error + '15', borderColor: colors.error }]}>
             <Text style={[styles.alertText, { color: colors.error }]}>{errorMessage}</Text>
@@ -318,6 +446,28 @@ export const RegisterScreen = ({ navigation }: any) => {
         {/* STEP 1: PERSONAL DETAILS */}
         {step === 1 && (
           <View style={styles.formContainer}>
+            {/* Quick Google Sign-Up Option */}
+            <TouchableOpacity
+              style={[styles.googleButton, { backgroundColor: colors.surface, borderColor: colors.border }]}
+              onPress={handleGoogleSignUp}
+              disabled={googleLoading || loading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator color={colors.primary} />
+              ) : (
+                <>
+                  <Chrome size={20} color="#ea4335" style={{ marginRight: 10 }} />
+                  <Text style={[styles.googleButtonText, { color: colors.text }]}>Sign up with Google</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <View style={styles.dividerRow}>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+              <Text style={[styles.dividerText, { color: colors.textMuted }]}>OR ENTER DETAILS</Text>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            </View>
+
             <Text style={[styles.label, { color: colors.textSecondary }]}>Full Name *</Text>
             <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <User size={18} color={colors.textMuted} style={styles.inputIcon} />
@@ -326,7 +476,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. Rahul Sharma"
                 placeholderTextColor={colors.textMuted}
                 value={fullName}
-                onChangeText={setFullName}
+                onChangeText={(val) => {
+                  setFullName(val);
+                  setErrorMessage('');
+                }}
               />
             </View>
 
@@ -338,7 +491,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. rahul.sharma@iitb.ac.in"
                 placeholderTextColor={colors.textMuted}
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(val) => {
+                  setEmail(val);
+                  setErrorMessage('');
+                }}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -353,7 +509,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. +91 98765 43210"
                 placeholderTextColor={colors.textMuted}
                 value={mobile}
-                onChangeText={setMobile}
+                onChangeText={(val) => {
+                  setMobile(val);
+                  setErrorMessage('');
+                }}
                 keyboardType="phone-pad"
               />
             </View>
@@ -371,7 +530,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. IIT Bombay / Delhi University"
                 placeholderTextColor={colors.textMuted}
                 value={college}
-                onChangeText={setCollege}
+                onChangeText={(val) => {
+                  setCollege(val);
+                  setErrorMessage('');
+                }}
               />
             </View>
 
@@ -383,7 +545,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. B.Tech / B.Sc / MBA"
                 placeholderTextColor={colors.textMuted}
                 value={course}
-                onChangeText={setCourse}
+                onChangeText={(val) => {
+                  setCourse(val);
+                  setErrorMessage('');
+                }}
               />
             </View>
 
@@ -396,7 +561,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                     placeholder="e.g. CSE / ECE"
                     placeholderTextColor={colors.textMuted}
                     value={branch}
-                    onChangeText={setBranch}
+                    onChangeText={(val) => {
+                      setBranch(val);
+                      setErrorMessage('');
+                    }}
                   />
                 </View>
               </View>
@@ -409,7 +577,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                     placeholder="1"
                     placeholderTextColor={colors.textMuted}
                     value={semester}
-                    onChangeText={setSemester}
+                    onChangeText={(val) => {
+                      setSemester(val);
+                      setErrorMessage('');
+                    }}
                     keyboardType="number-pad"
                   />
                 </View>
@@ -423,7 +594,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="e.g. 22B030149"
                 placeholderTextColor={colors.textMuted}
                 value={enrollmentNo}
-                onChangeText={setEnrollmentNo}
+                onChangeText={(val) => {
+                  setEnrollmentNo(val);
+                  setErrorMessage('');
+                }}
                 autoCapitalize="characters"
               />
             </View>
@@ -443,10 +617,12 @@ export const RegisterScreen = ({ navigation }: any) => {
                 value={password}
                 onChangeText={(val) => {
                   setPassword(val);
-                  if (errorMessage) setErrorMessage('');
+                  setErrorMessage('');
                 }}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
+                autoCorrect={false}
+                textContentType="newPassword"
               />
               <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle password visibility">
                 {showPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
@@ -457,7 +633,15 @@ export const RegisterScreen = ({ navigation }: any) => {
             <PasswordRequirementsView password={password} showStrength={true} />
 
             <Text style={[styles.label, { color: colors.textSecondary, marginTop: Spacing.md }]}>Confirm Password *</Text>
-            <View style={[styles.inputWrapper, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <View
+              style={[
+                styles.inputWrapper,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: isConfirmMatch ? '#22c55e' : isConfirmMismatch ? '#f59e0b' : colors.border,
+                },
+              ]}
+            >
               <Lock size={18} color={colors.textMuted} style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { color: colors.text }]}
@@ -466,15 +650,34 @@ export const RegisterScreen = ({ navigation }: any) => {
                 value={confirmPassword}
                 onChangeText={(val) => {
                   setConfirmPassword(val);
-                  if (errorMessage) setErrorMessage('');
+                  setErrorMessage('');
                 }}
                 secureTextEntry={!showConfirmPassword}
                 autoCapitalize="none"
+                autoCorrect={false}
+                textContentType="newPassword"
               />
               <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.eyeIcon} accessibilityLabel="Toggle confirm password visibility">
                 {showConfirmPassword ? <EyeOff size={18} color={colors.textMuted} /> : <Eye size={18} color={colors.textMuted} />}
               </TouchableOpacity>
             </View>
+
+            {/* Live Confirm Status Feedback */}
+            {confirmPassword.length > 0 && (
+              <View style={styles.confirmStatusRow}>
+                {isConfirmMatch ? (
+                  <>
+                    <CheckCircle2 size={14} color="#22c55e" style={{ marginRight: 5 }} />
+                    <Text style={[styles.confirmStatusText, { color: '#22c55e' }]}>Passwords match</Text>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle size={14} color="#f59e0b" style={{ marginRight: 5 }} />
+                    <Text style={[styles.confirmStatusText, { color: '#f59e0b' }]}>Passwords do not match</Text>
+                  </>
+                )}
+              </View>
+            )}
           </View>
         )}
 
@@ -491,7 +694,10 @@ export const RegisterScreen = ({ navigation }: any) => {
                 placeholder="• • • • • •"
                 placeholderTextColor={colors.textMuted}
                 value={otpCode}
-                onChangeText={setOtpCode}
+                onChangeText={(val) => {
+                  setOtpCode(val);
+                  setErrorMessage('');
+                }}
                 keyboardType="number-pad"
                 maxLength={6}
               />
@@ -526,7 +732,14 @@ export const RegisterScreen = ({ navigation }: any) => {
           )}
 
           <TouchableOpacity
-            style={[styles.nextButton, { backgroundColor: colors.primary, flex: step === 1 ? 1 : 2 }]}
+            style={[
+              styles.nextButton,
+              {
+                backgroundColor: colors.primary,
+                flex: step === 1 ? 1 : 2,
+                opacity: (step === 3 && !canSubmitStep3) ? 0.65 : 1,
+              },
+            ]}
             onPress={handleNextStep}
             disabled={loading}
           >
@@ -606,6 +819,34 @@ const styles = StyleSheet.create({
   formContainer: {
     width: '100%',
   },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 48,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    marginBottom: Spacing.lg,
+  },
+  googleButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.lg,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: Spacing.md,
+    letterSpacing: 1,
+  },
   label: {
     fontSize: 13,
     fontWeight: '600',
@@ -628,6 +869,16 @@ const styles = StyleSheet.create({
   },
   eyeIcon: {
     padding: 6,
+  },
+  confirmStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    paddingHorizontal: 4,
+  },
+  confirmStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   splitRow: {
     flexDirection: 'row',
