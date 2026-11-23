@@ -161,3 +161,65 @@ export interface MarketAnalytics {
   openReports: number;
   restrictedAccounts: number;
 }
+
+export type MarketOrderStatus =
+  | 'Pending'
+  | 'Accepted'
+  | 'Ready for Pickup'
+  | 'Completed'
+  | 'Cancelled'
+  | 'Rejected';
+
+export type MarketPaymentMethod = 'Cash on Pickup' | 'UPI at Pickup' | 'Campus Escrow';
+export type MarketPaymentStatus = 'Pending' | 'Paid';
+export type MarketFulfillmentMethod = 'Campus Pickup' | 'Seller Delivery';
+
+export interface MarketCartItem {
+  userId: string;
+  listingId: string;
+  quantity: number;
+  addedAt: string;
+  updatedAt: string;
+  listing?: MarketListing;
+}
+
+export interface MarketOrderItem {
+  listingId: string;
+  title: string;
+  priceINR: number;
+  quantity: number;
+  image: string;
+  sellerId: string;
+  sellerName: string;
+}
+
+export interface MarketOrderStatusHistoryItem {
+  status: MarketOrderStatus;
+  changedBy: string;
+  note: string;
+  changedAt: string;
+}
+
+export interface MarketOrder {
+  id: string;
+  buyerId: string;
+  buyerName: string;
+  buyerEmail?: string;
+  buyerPhone?: string;
+  sellerId: string;
+  sellerName: string;
+  items: MarketOrderItem[];
+  subtotalINR: number;
+  deliveryFeeINR: number;
+  totalPriceINR: number;
+  fulfillmentMethod: MarketFulfillmentMethod;
+  pickupLocation: string;
+  buyerNote?: string;
+  paymentMethod: MarketPaymentMethod;
+  paymentStatus: MarketPaymentStatus;
+  status: MarketOrderStatus;
+  statusHistory: MarketOrderStatusHistoryItem[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}

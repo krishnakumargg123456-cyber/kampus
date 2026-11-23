@@ -14,6 +14,12 @@ import type {
   MarketReport,
   MarketRole,
   SellerVerificationMap,
+  MarketCartItem,
+  MarketOrder,
+  MarketOrderItem,
+  MarketOrderStatus,
+  MarketPaymentMethod,
+  MarketFulfillmentMethod,
 } from '../src/types/market.ts';
 
 interface StoredMarketImage {
@@ -39,6 +45,8 @@ interface MarketDatabase {
   restrictedUserIds: string[];
   roleOverrides: Record<string, { role: MarketRole; label: string }>;
   uploadedImages: Record<string, StoredMarketImage>;
+  cartByUser: Record<string, MarketCartItem[]>;
+  orders: MarketOrder[];
 }
 
 const DB_PATH = path.join(process.cwd(), '.kampus_market_db.json');
@@ -497,6 +505,8 @@ function createSeedDatabase(): MarketDatabase {
     restrictedUserIds: [],
     roleOverrides: {},
     uploadedImages: {},
+    cartByUser: {},
+    orders: [],
   };
 }
 
@@ -508,7 +518,10 @@ const marketStorage = new ModuleStorage<MarketDatabase>(
 );
 
 function loadDb(): MarketDatabase {
-  return marketStorage.get();
+  const db = marketStorage.get();
+  if (!db.cartByUser) db.cartByUser = {};
+  if (!Array.isArray(db.orders)) db.orders = [];
+  return db;
 }
 
 function saveDb(db: MarketDatabase): void {
@@ -595,6 +608,13 @@ export function registerMarketBackend(app: Express) {
       exchangeProposals: db.exchangeProposals.filter(
         (x) => x.proposerId === userId || x.ownerId === userId
       ),
+      cart: (db.cartByUser[userId] || [])
+        .map((item) => ({
+          ...item,
+          listing: db.listings.find((l) => l.id === item.listingId),
+        }))
+        .filter((item) => item.listing),
+      orders: db.orders.filter((o) => o.buyerId === userId || o.sellerId === userId),
       blockedUserIds: blocked,
       sellerVerification,
       roleInfo,
@@ -682,6 +702,59 @@ export function registerMarketBackend(app: Express) {
     db.recentSearchesByUser[userId] = [trimmed, ...prev].slice(0, 8);
     saveDb(db);
     return res.json({ recentSearches: db.recentSearchesByUser[userId] });
+  });
+
+  // 4b. Query / Search Listings
+  app.get('/api/market/listings', (req: Request, res: Response) => {
+    const qSearch = String(req.query.search || '').trim().toLowerCase();
+    const qCategory = String(req.query.category || '').trim();
+    const qCampus = String(req.query.campus || '').trim();
+    const qCondition = String(req.query.condition || '').trim();
+    const qSellerId = String(req.query.sellerId || '').trim();
+    const qStatus = String(req.query.status || '').trim();
+    const qSort = String(req.query.sort || 'newest').trim();
+    const qListingType = String(req.query.listingType || '').trim();
+
+    let results = db.listings.filter((item) => {
+      // Default to Active if status not specified, unless filtering by sellerId
+      if (qStatus) {
+        if (item.status !== qStatus) return false;
+      } else if (!qSellerId && item.status !== 'Active') {
+        return false;
+      }
+
+      if (qSellerId && item.sellerId !== qSellerId) return false;
+      if (qCategory && qCategory !== 'All' && item.category !== qCategory) return false;
+      if (qCampus && qCampus !== 'All Campuses' && qCampus !== 'All' && item.sellerCampus && item.sellerCampus !== qCampus) {
+        return false;
+      }
+      if (qCondition && item.condition !== qCondition) return false;
+      if (qListingType && item.listingType !== qListingType) return false;
+
+      if (qSearch) {
+        const matchesTitle = item.title.toLowerCase().includes(qSearch);
+        const matchesCategory = item.category.toLowerCase().includes(qSearch);
+        const matchesDesc = (item.description || '').toLowerCase().includes(qSearch);
+        const matchesBrand = (item.brand || '').toLowerCase().includes(qSearch);
+        const matchesSeller = (item.sellerName || '').toLowerCase().includes(qSearch);
+        if (!matchesTitle && !matchesCategory && !matchesDesc && !matchesBrand && !matchesSeller) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    // Sorting
+    if (qSort === 'price_low' || qSort === 'price_asc') {
+      results.sort((a, b) => (a.priceINR ?? 0) - (b.priceINR ?? 0));
+    } else if (qSort === 'price_high' || qSort === 'price_desc') {
+      results.sort((a, b) => (b.priceINR ?? 0) - (a.priceINR ?? 0));
+    } else {
+      results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+
+    return res.json({ listings: results, total: results.length });
   });
 
   // 5. Create Listing (Runs Prohibited-Item Check)
@@ -1095,5 +1168,310 @@ export function registerMarketBackend(app: Express) {
     if (typeof b.resolutionNote === 'string') rp.resolutionNote = b.resolutionNote;
     saveDb(db);
     return res.json({ report: rp, analytics: computeAnalytics(db) });
+  });
+
+  // 13. Cart Endpoints (Persistent per-user shopping cart)
+  function getHydratedCart(userId: string) {
+    const rawItems = db.cartByUser[userId] || [];
+    const hydrated = rawItems
+      .map((item) => {
+        const listing = db.listings.find((l) => l.id === item.listingId);
+        return {
+          ...item,
+          listing,
+        };
+      })
+      .filter((item) => Boolean(item.listing));
+    const subtotalINR = hydrated.reduce((acc, item) => {
+      if (item.listing && item.listing.status === 'Active' && typeof item.listing.priceINR === 'number') {
+        return acc + item.listing.priceINR * (item.quantity || 1);
+      }
+      return acc;
+    }, 0);
+    return { items: hydrated, subtotalINR };
+  }
+
+  app.get('/api/market/cart', (req: Request, res: Response) => {
+    const userId = String(req.query.userId || '').trim();
+    if (!userId) return res.status(400).json({ message: 'userId query parameter is required.' });
+    return res.json(getHydratedCart(userId));
+  });
+
+  app.post('/api/market/cart', (req: Request, res: Response) => {
+    const { userId, listingId, quantity = 1 } = req.body || {};
+    if (!userId || !listingId) {
+      return res.status(400).json({ message: 'userId and listingId are required.' });
+    }
+    const listing = db.listings.find((l) => l.id === listingId);
+    if (!listing) {
+      return res.status(404).json({ message: 'Listing not found.' });
+    }
+    if (listing.sellerId === userId) {
+      return res.status(400).json({ message: 'You cannot add your own product to your cart.' });
+    }
+    if (listing.status !== 'Active') {
+      return res.status(400).json({ message: `This item is currently ${listing.status}.` });
+    }
+
+    if (!db.cartByUser[userId]) {
+      db.cartByUser[userId] = [];
+    }
+    const existing = db.cartByUser[userId].find((i) => i.listingId === listingId);
+    const now = new Date().toISOString();
+    const qty = Math.max(1, Math.min(10, Number(quantity) || 1));
+
+    if (existing) {
+      existing.quantity = qty;
+      existing.updatedAt = now;
+    } else {
+      db.cartByUser[userId].push({
+        userId,
+        listingId,
+        quantity: qty,
+        addedAt: now,
+        updatedAt: now,
+      });
+    }
+    saveDb(db);
+    return res.status(201).json(getHydratedCart(userId));
+  });
+
+  app.delete('/api/market/cart/:listingId', (req: Request, res: Response) => {
+    const userId = String(req.query.userId || req.body?.userId || '').trim();
+    const listingId = req.params.listingId;
+    if (!userId) return res.status(400).json({ message: 'userId is required.' });
+
+    if (db.cartByUser[userId]) {
+      db.cartByUser[userId] = db.cartByUser[userId].filter((i) => i.listingId !== listingId);
+      saveDb(db);
+    }
+    return res.json(getHydratedCart(userId));
+  });
+
+  app.delete('/api/market/cart', (req: Request, res: Response) => {
+    const userId = String(req.query.userId || req.body?.userId || '').trim();
+    if (!userId) return res.status(400).json({ message: 'userId is required.' });
+
+    db.cartByUser[userId] = [];
+    saveDb(db);
+    return res.json({ items: [], subtotalINR: 0 });
+  });
+
+  // 14. Orders & Buying Endpoints (Complete State Machine & Inventory Depletion)
+  app.post('/api/market/orders', (req: Request, res: Response) => {
+    const b = req.body || {};
+    const buyerId = String(b.buyerId || '').trim();
+    const buyerName = String(b.buyerName || 'Student Buyer').trim();
+    const buyerEmail = String(b.buyerEmail || '').trim();
+    const buyerPhone = String(b.buyerPhone || '').trim();
+    const fulfillmentMethod: MarketFulfillmentMethod =
+      b.fulfillmentMethod === 'Seller Delivery' ? 'Seller Delivery' : 'Campus Pickup';
+    const pickupLocation = String(b.pickupLocation || 'Campus Central Library Gate').trim();
+    const buyerNote = String(b.buyerNote || '').trim();
+    const paymentMethod: MarketPaymentMethod =
+      b.paymentMethod === 'UPI at Pickup' ? 'UPI at Pickup' : 'Cash on Pickup';
+
+    const rawItems: { listingId: string; quantity?: number }[] = Array.isArray(b.items) ? b.items : [];
+    if (!buyerId || rawItems.length === 0) {
+      return res.status(400).json({ message: 'buyerId and items array are required.' });
+    }
+
+    // Validate all items
+    const validatedItems: { listing: MarketListing; quantity: number }[] = [];
+    for (const raw of rawItems) {
+      const listing = db.listings.find((l) => l.id === raw.listingId);
+      if (!listing) {
+        return res.status(404).json({ message: `Listing ${raw.listingId} not found.` });
+      }
+      if (listing.sellerId === buyerId) {
+        return res.status(400).json({ message: `Cannot purchase your own listing: "${listing.title}".` });
+      }
+      if (listing.status !== 'Active') {
+        return res.status(400).json({ message: `Item "${listing.title}" is no longer active (Status: ${listing.status}).` });
+      }
+      validatedItems.push({
+        listing,
+        quantity: Math.max(1, Number(raw.quantity) || 1),
+      });
+    }
+
+    // Group items by sellerId so each seller gets an identifiable order
+    const itemsBySeller: Record<string, { listing: MarketListing; quantity: number }[]> = {};
+    for (const v of validatedItems) {
+      if (!itemsBySeller[v.listing.sellerId]) {
+        itemsBySeller[v.listing.sellerId] = [];
+      }
+      itemsBySeller[v.listing.sellerId].push(v);
+    }
+
+    const createdOrders: MarketOrder[] = [];
+    const now = new Date().toISOString();
+
+    for (const [sellerId, sellerItems] of Object.entries(itemsBySeller)) {
+      const firstListing = sellerItems[0].listing;
+      const orderItems: MarketOrderItem[] = sellerItems.map((si) => ({
+        listingId: si.listing.id,
+        title: si.listing.title,
+        priceINR: si.listing.priceINR || 0,
+        quantity: si.quantity,
+        image: Array.isArray(si.listing.images) && si.listing.images[0] ? si.listing.images[0] : 'books',
+        sellerId: si.listing.sellerId,
+        sellerName: si.listing.sellerName,
+      }));
+
+      const subtotalINR = orderItems.reduce((acc, oi) => acc + oi.priceINR * oi.quantity, 0);
+      const deliveryFeeINR = 0; // Free campus student pickup
+      const totalPriceINR = subtotalINR + deliveryFeeINR;
+
+      const orderId = `mord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const order: MarketOrder = {
+        id: orderId,
+        buyerId,
+        buyerName,
+        buyerEmail,
+        buyerPhone,
+        sellerId,
+        sellerName: firstListing.sellerName,
+        items: orderItems,
+        subtotalINR,
+        deliveryFeeINR,
+        totalPriceINR,
+        fulfillmentMethod,
+        pickupLocation,
+        buyerNote,
+        paymentMethod,
+        paymentStatus: 'Pending',
+        status: 'Pending',
+        statusHistory: [
+          {
+            status: 'Pending',
+            changedBy: buyerName,
+            note: 'Order placed by student buyer',
+            changedAt: now,
+          },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      db.orders.unshift(order);
+      createdOrders.push(order);
+    }
+
+    // Clear ordered items from the buyer's cart
+    if (db.cartByUser[buyerId]) {
+      const purchasedListingIds = validatedItems.map((v) => v.listing.id);
+      db.cartByUser[buyerId] = db.cartByUser[buyerId].filter(
+        (ci) => !purchasedListingIds.includes(ci.listingId)
+      );
+    }
+
+    saveDb(db);
+    return res.status(201).json({
+      ok: true,
+      orders: createdOrders,
+      message: `Successfully placed ${createdOrders.length} order(s).`,
+    });
+  });
+
+  app.get('/api/market/orders', (req: Request, res: Response) => {
+    const userId = String(req.query.userId || '').trim();
+    if (!userId) return res.status(400).json({ message: 'userId query parameter is required.' });
+
+    const role = String(req.query.role || 'all').toLowerCase();
+    let userOrders = db.orders;
+
+    if (role === 'buyer') {
+      userOrders = db.orders.filter((o) => o.buyerId === userId);
+    } else if (role === 'seller') {
+      userOrders = db.orders.filter((o) => o.sellerId === userId);
+    } else {
+      userOrders = db.orders.filter((o) => o.buyerId === userId || o.sellerId === userId);
+    }
+
+    return res.json({ orders: userOrders });
+  });
+
+  app.get('/api/market/orders/:id', (req: Request, res: Response) => {
+    const order = db.orders.find((o) => o.id === req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found.' });
+
+    const userId = String(req.query.userId || '').trim();
+    const userRole = db.roleOverrides[userId]?.role || 'Student';
+    if (userId && order.buyerId !== userId && order.sellerId !== userId && !isPrivilegedRole(userRole)) {
+      return res.status(403).json({ message: '403 Forbidden: You do not have access to this order.' });
+    }
+
+    return res.json({ order });
+  });
+
+  app.patch('/api/market/orders/:id/status', (req: Request, res: Response) => {
+    const order = db.orders.find((o) => o.id === req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found.' });
+
+    const b = req.body || {};
+    const actorId = String(b.userId || '').trim();
+    const nextStatus = b.status as MarketOrderStatus;
+    const note = String(b.note || `Status changed to ${nextStatus}`).trim();
+    const userRole = db.roleOverrides[actorId]?.role || 'Student';
+    const isActorBuyer = actorId === order.buyerId;
+    const isActorSeller = actorId === order.sellerId;
+    const isPrivileged = isPrivilegedRole(userRole);
+
+    if (!isActorBuyer && !isActorSeller && !isPrivileged) {
+      return res.status(403).json({ message: '403 Forbidden: Not authorized to update this order.' });
+    }
+
+    // Status transition validation
+    if (nextStatus === 'Cancelled') {
+      if (!isActorBuyer && !isActorSeller && !isPrivileged) {
+        return res.status(403).json({ message: 'Only buyer or seller can cancel an order.' });
+      }
+      if (order.status === 'Completed') {
+        return res.status(400).json({ message: 'Cannot cancel a completed order.' });
+      }
+    } else if (nextStatus === 'Rejected') {
+      if (!isActorSeller && !isPrivileged) {
+        return res.status(403).json({ message: 'Only seller can reject an order.' });
+      }
+    } else if (['Accepted', 'Ready for Pickup', 'Completed'].includes(nextStatus)) {
+      if (!isActorSeller && !isPrivileged) {
+        return res.status(403).json({ message: `Only seller can mark order as ${nextStatus}.` });
+      }
+    }
+
+    const now = new Date().toISOString();
+    order.status = nextStatus;
+    order.updatedAt = now;
+    order.statusHistory.push({
+      status: nextStatus,
+      changedBy: actorId,
+      note,
+      changedAt: now,
+    });
+
+    // If order is completed, mark item as Sold and payment as Paid
+    if (nextStatus === 'Completed') {
+      order.paymentStatus = 'Paid';
+      order.completedAt = now;
+
+      // Mark the sold listings in the shared marketplace
+      for (const item of order.items) {
+        const listing = db.listings.find((l) => l.id === item.listingId);
+        if (listing) {
+          listing.status = 'Sold';
+          listing.updatedAt = now;
+          listing.statusHistory.push({
+            status: 'Sold',
+            changedBy: order.sellerName,
+            note: `Sold via Order #${order.id} to ${order.buyerName}`,
+            changedAt: now,
+          });
+        }
+      }
+    }
+
+    saveDb(db);
+    return res.json({ ok: true, order });
   });
 }

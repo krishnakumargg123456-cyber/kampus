@@ -19,6 +19,9 @@ import type {
   OfferStatus,
   RequestWorkflowStatus,
   SellerVerificationMap,
+  MarketCartItem,
+  MarketOrder,
+  MarketOrderStatus,
 } from '../types/market';
 
 const CHAT_HANDOFF_KEY = 'kampus_chat_handoff_v1';
@@ -35,6 +38,8 @@ export interface MarketContextType {
   offers: MarketOffer[];
   giveawayRequests: GiveawayRequest[];
   exchangeProposals: ExchangeProposal[];
+  cart: MarketCartItem[];
+  orders: MarketOrder[];
   blockedUserIds: string[];
   sellerVerification: SellerVerificationMap;
   roleInfo: { role: MarketRole; label: string | null };
@@ -44,6 +49,21 @@ export interface MarketContextType {
   selectedCampusLocation: string;
   setSelectedCampusLocation: (loc: string) => void;
   reload: () => Promise<void>;
+  addToCart: (listingId: string, quantity?: number) => Promise<boolean>;
+  removeFromCart: (listingId: string) => Promise<boolean>;
+  clearCart: () => Promise<boolean>;
+  placeOrder: (payload: {
+    items: { listingId: string; quantity: number }[];
+    fulfillmentMethod?: 'Campus Pickup' | 'Seller Delivery';
+    pickupLocation?: string;
+    buyerNote?: string;
+    paymentMethod?: 'Cash on Pickup' | 'UPI at Pickup';
+  }) => Promise<MarketOrder[] | null>;
+  updateOrderStatus: (
+    orderId: string,
+    status: MarketOrderStatus,
+    note?: string
+  ) => Promise<boolean>;
   switchRoleSession: (passkey?: string, revert?: boolean) => Promise<boolean>;
   recordRecentSearch: (query: string) => Promise<void>;
   clearRecentSearches: () => Promise<void>;
@@ -154,6 +174,8 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [offers, setOffers] = useState<MarketOffer[]>([]);
   const [giveawayRequests, setGiveawayRequests] = useState<GiveawayRequest[]>([]);
   const [exchangeProposals, setExchangeProposals] = useState<ExchangeProposal[]>([]);
+  const [cart, setCart] = useState<MarketCartItem[]>([]);
+  const [orders, setOrders] = useState<MarketOrder[]>([]);
   const [blockedUserIds, setBlockedUserIds] = useState<string[]>([]);
   const [sellerVerification, setSellerVerification] = useState<SellerVerificationMap>({});
   const [roleInfo, setRoleInfo] = useState<{ role: MarketRole; label: string | null }>({
@@ -198,6 +220,8 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setOffers(data.offers || []);
       setGiveawayRequests(data.giveawayRequests || []);
       setExchangeProposals(data.exchangeProposals || []);
+      setCart(data.cart || []);
+      setOrders(data.orders || []);
       setBlockedUserIds(data.blockedUserIds || []);
       setSellerVerification(data.sellerVerification || {});
       setRoleInfo(data.roleInfo || { role: 'Student', label: null });
@@ -894,6 +918,118 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     [userId, showToast]
   );
 
+  const addToCart = useCallback(
+    async (listingId: string, quantity = 1) => {
+      try {
+        const res = await fetch('/api/market/cart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, listingId, quantity }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Failed to add to cart.');
+        setCart(data.items || []);
+        showToast('success', 'Added to KAMPUS Market cart.');
+        return true;
+      } catch (err: any) {
+        showToast('error', err.message || 'Could not add to cart.');
+        return false;
+      }
+    },
+    [userId, showToast]
+  );
+
+  const removeFromCart = useCallback(
+    async (listingId: string) => {
+      try {
+        const res = await fetch(`/api/market/cart/${encodeURIComponent(listingId)}?userId=${encodeURIComponent(userId)}`, {
+          method: 'DELETE',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Failed to remove from cart.');
+        setCart(data.items || []);
+        showToast('info', 'Item removed from cart.');
+        return true;
+      } catch (err: any) {
+        showToast('error', err.message || 'Could not remove item.');
+        return false;
+      }
+    },
+    [userId, showToast]
+  );
+
+  const clearCart = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/market/cart?userId=${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error('Failed to clear cart.');
+      setCart([]);
+      return true;
+    } catch (err: any) {
+      showToast('error', err.message || 'Could not clear cart.');
+      return false;
+    }
+  }, [userId, showToast]);
+
+  const placeOrder = useCallback(
+    async (payload: {
+      items: { listingId: string; quantity: number }[];
+      fulfillmentMethod?: 'Campus Pickup' | 'Seller Delivery';
+      pickupLocation?: string;
+      buyerNote?: string;
+      paymentMethod?: 'Cash on Pickup' | 'UPI at Pickup';
+    }) => {
+      try {
+        const res = await fetch('/api/market/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            buyerId: userId,
+            buyerName: userName,
+            buyerEmail: user?.email || '',
+            buyerPhone: (user as any)?.mobile || '',
+            ...payload,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Failed to place order.');
+        setOrders((prev) => [...(data.orders || []), ...prev]);
+        showToast('success', data.message || 'Order placed successfully!');
+        void reload();
+        return data.orders || [];
+      } catch (err: any) {
+        showToast('error', err.message || 'Order placement failed.');
+        return null;
+      }
+    },
+    [userId, userName, user, showToast, reload]
+  );
+
+  const updateOrderStatus = useCallback(
+    async (orderId: string, status: MarketOrderStatus, note?: string) => {
+      try {
+        const res = await fetch(`/api/market/orders/${orderId}/status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, status, note }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Failed to update order status.');
+        setOrders((prev) =>
+          prev.map((o) => (o.id === orderId ? data.order : o))
+        );
+        showToast('success', `Order status updated to ${status}.`);
+        void reload();
+        return true;
+      } catch (err: any) {
+        showToast('error', err.message || 'Could not update status.');
+        return false;
+      }
+    },
+    [userId, showToast, reload]
+  );
+
   const value = useMemo<MarketContextType>(
     () => ({
       loading,
@@ -907,6 +1043,8 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       offers,
       giveawayRequests,
       exchangeProposals,
+      cart,
+      orders,
       blockedUserIds,
       sellerVerification,
       roleInfo,
@@ -924,6 +1062,11 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       updateListing,
       deleteListing,
       toggleWishlist,
+      addToCart,
+      removeFromCart,
+      clearCart,
+      placeOrder,
+      updateOrderStatus,
       submitOffer,
       respondToOffer,
       submitGiveawayRequest,
@@ -950,6 +1093,8 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       offers,
       giveawayRequests,
       exchangeProposals,
+      cart,
+      orders,
       blockedUserIds,
       sellerVerification,
       roleInfo,
@@ -957,6 +1102,7 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       reports,
       analytics,
       selectedCampusLocation,
+      setSelectedCampusLocation,
       reload,
       switchRoleSession,
       recordRecentSearch,
@@ -966,6 +1112,11 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       updateListing,
       deleteListing,
       toggleWishlist,
+      addToCart,
+      removeFromCart,
+      clearCart,
+      placeOrder,
+      updateOrderStatus,
       submitOffer,
       respondToOffer,
       submitGiveawayRequest,

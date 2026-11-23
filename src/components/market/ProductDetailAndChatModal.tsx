@@ -13,6 +13,7 @@ import {
   Repeat,
   Share2,
   ShieldCheck,
+  ShoppingBag,
   Tag,
   Truck,
   X,
@@ -62,6 +63,7 @@ export const ProductDetailAndChatModal: React.FC<ProductDetailAndChatModalProps>
     submitReport,
     toggleBlockSeller,
     showToast,
+    addToCart,
   } = useMarket();
 
   const images = listing.images.length > 0 ? listing.images : ['books'];
@@ -402,14 +404,24 @@ export const ProductDetailAndChatModal: React.FC<ProductDetailAndChatModalProps>
                   </button>
 
                   {!isOwner && listing.listingType === 'For Sale' && listing.status === 'Active' && (
-                    <button
-                      type="button"
-                      onClick={() => setShowOfferForm((v) => !v)}
-                      className="py-3 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold inline-flex items-center justify-center gap-2 transition-colors"
-                    >
-                      <Tag className="w-4 h-4" />
-                      <span>Make an Offer</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => addToCart(listing.id, 1)}
+                        className="py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-bold inline-flex items-center justify-center gap-2 transition-colors shadow-sm"
+                      >
+                        <ShoppingBag className="w-4 h-4" />
+                        <span>Add to Cart</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowOfferForm((v) => !v)}
+                        className="py-3 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold inline-flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <Tag className="w-4 h-4" />
+                        <span>Make an Offer</span>
+                      </button>
+                    </>
                   )}
 
                   {!isOwner && listing.listingType === 'Giveaway' && listing.status === 'Active' && (
