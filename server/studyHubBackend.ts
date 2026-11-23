@@ -1050,9 +1050,9 @@ export function registerStudyHubBackend(app: Express): void {
 
       const db = loadDb();
 
-      // Check overlapping sessions on the same date for this user
+      // Check overlapping sessions on the same date for this specific user
       const hasOverlap = db.plannerSessions.some((s) => {
-        if (s.userId !== userId && s.userId !== 'global_sample') return false;
+        if (s.userId !== userId) return false;
         if (s.date !== date || s.status === 'Cancelled') return false;
         // Overlap condition: start < other.end && end > other.start
         return startTime < s.endTime && endTime > s.startTime;

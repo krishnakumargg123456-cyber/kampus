@@ -43,5 +43,6 @@ mobile/dist/
 mobile/src_backup_clerk/
 mobile/*backup*/
 *_backup_*/
+uploads/
 
 
