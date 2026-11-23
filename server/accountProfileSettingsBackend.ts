@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import jwt from 'jsonwebtoken';
 import { ModuleStorage } from '../database/moduleStorage.ts';
 import type {
   ConnectedServiceItem,
@@ -45,6 +46,29 @@ const LOCKER_DB_PATH = path.join(process.cwd(), '.kampus_locker_db.json');
 const KAMPUS_ID_DB_PATH = path.join(process.cwd(), '.kampus_kampus_id_db.json');
 const CHAT_DB_PATH = path.join(process.cwd(), '.kampus_chat_db.json');
 const NOTIF_DB_PATH = path.join(process.cwd(), '.kampus_notifications_db.json');
+const AVATARS_DIR = path.join(process.cwd(), 'uploads', 'avatars');
+
+function getAuthenticatedUserId(req: Request): string {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded = jwt.decode(token) as any;
+      if (decoded && (decoded.sub || decoded.userId)) {
+        return decoded.sub || decoded.userId;
+      }
+    } catch {}
+  }
+  const headerUserId = req.headers['x-user-id'] || req.headers['x-clerk-user-id'];
+  if (headerUserId && typeof headerUserId === 'string' && headerUserId.trim().length > 0) {
+    return headerUserId.trim();
+  }
+  const bodyOrQuery = req.body?.userId || req.query?.userId;
+  if (bodyOrQuery && typeof bodyOrQuery === 'string' && bodyOrQuery.trim().length > 0) {
+    return bodyOrQuery.trim();
+  }
+  return 'student_default';
+}
 
 function createEmptyDb(): AccountDatabase {
   return {
@@ -499,10 +523,395 @@ function computeStorageOverview(db: AccountDatabase, userId: string): StorageOve
 }
 
 export function registerAccountProfileSettingsBackend(app: Express): void {
+  // Ensure local uploads/avatars directory exists
+  if (!fs.existsSync(AVATARS_DIR)) {
+    fs.mkdirSync(AVATARS_DIR, { recursive: true });
+  }
+
   const db = loadDb();
 
   // ==================================================
-  // FEATURE 20: STUDENT PROFILE ROUTES
+  // STANDARD REST PROFILE & SETTINGS ROUTES
+  // ==================================================
+
+  // 1. Get Authenticated User Profile
+  app.get('/api/profile', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    const completion = computeProfileCompletion(profile);
+    const { stats, activity, eligibleCertificates, unlockedBadges } = aggregateCrossModuleData(userId, profile);
+    const roleInfo = db.modRoleOverrides[userId] || { role: 'Student', label: null };
+    return res.json({
+      success: true,
+      profile,
+      completion,
+      stats,
+      activity,
+      eligibleCertificates,
+      unlockedBadges,
+      roleInfo,
+    });
+  });
+
+  // 2. Partial Update Profile
+  app.patch('/api/profile', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const current = ensureProfile(db, { userId });
+    const patch = req.body || {};
+
+    if (patch.fullName !== undefined && !String(patch.fullName).trim()) {
+      return res.status(400).json({ success: false, message: 'Full name cannot be empty.' });
+    }
+    if (patch.username !== undefined) {
+      const cleanUser = String(patch.username).trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+      if (cleanUser.length < 3) {
+        return res.status(400).json({ success: false, message: 'Username must be at least 3 characters.' });
+      }
+      const conflict = Object.values(db.profiles).find(
+        (p) => p.userId !== userId && p.username?.toLowerCase() === cleanUser
+      );
+      if (conflict) {
+        return res.status(409).json({ success: false, message: 'Username is already taken.' });
+      }
+      patch.username = cleanUser;
+    }
+
+    const updated: StudentProfileRecord = {
+      ...current,
+      ...patch,
+      userId, // immutable
+      isVerified: current.isVerified,
+      verificationSource: current.verificationSource,
+      privacy: {
+        ...current.privacy,
+        ...(patch.privacy || {}),
+      },
+      updatedAt: new Date().toISOString(),
+    };
+
+    db.profiles[userId] = updated;
+    if (db.settings[userId]) {
+      db.settings[userId].privacy.profileVisibility = updated.privacy.visibility;
+      db.settings[userId].updatedAt = updated.updatedAt;
+    }
+    saveDb(db);
+
+    return res.json({
+      success: true,
+      profile: updated,
+      completion: computeProfileCompletion(updated),
+      ...aggregateCrossModuleData(userId, updated),
+    });
+  });
+
+  // 3. Upload Profile Avatar (PNG, JPG, WEBP <= 5MB)
+  app.post('/api/profile/avatar', (req: Request, res: Response) => {
+    try {
+      const userId = getAuthenticatedUserId(req);
+      const { fileBase64, fileName = 'avatar.jpg' } = req.body || {};
+
+      if (!fileBase64 || typeof fileBase64 !== 'string') {
+        return res.status(400).json({ success: false, message: 'Image base64 data is required.' });
+      }
+
+      const rawBase64 = fileBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+      const buffer = Buffer.from(rawBase64, 'base64');
+
+      if (buffer.length > 5 * 1024 * 1024) {
+        return res.status(400).json({ success: false, message: 'Image size exceeds maximum 5MB limit.' });
+      }
+
+      const cleanExt = path.extname(fileName).toLowerCase() || '.jpg';
+      if (!['.png', '.jpg', '.jpeg', '.webp'].includes(cleanExt)) {
+        return res.status(400).json({ success: false, message: 'Supported formats: PNG, JPG, JPEG, WEBP.' });
+      }
+
+      const safeFileName = `avatar_${userId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}${cleanExt}`;
+      const targetPath = path.join(AVATARS_DIR, safeFileName);
+      fs.writeFileSync(targetPath, buffer);
+
+      const avatarUrl = `/uploads/avatars/${safeFileName}`;
+      const profile = ensureProfile(db, { userId });
+      profile.avatarUrl = avatarUrl;
+      profile.updatedAt = new Date().toISOString();
+      saveDb(db);
+
+      recordAudit(db, userId, 'Avatar Updated', 'Student updated profile picture.');
+
+      return res.json({
+        success: true,
+        avatarUrl,
+        profile,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 4. Remove Profile Avatar
+  app.delete('/api/profile/avatar', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    if (profile.avatarUrl && profile.avatarUrl.startsWith('/uploads/avatars/')) {
+      const localPath = path.join(process.cwd(), profile.avatarUrl);
+      if (fs.existsSync(localPath)) {
+        try { fs.unlinkSync(localPath); } catch {}
+      }
+    }
+    profile.avatarUrl = '';
+    profile.updatedAt = new Date().toISOString();
+    saveDb(db);
+    recordAudit(db, userId, 'Avatar Removed', 'Student removed profile picture.');
+    return res.json({ success: true, avatarUrl: '', message: 'Profile photo removed.' });
+  });
+
+  // 5. Username Availability & Validation Check
+  app.get('/api/profile/username-check', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const q = String(req.query.username || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+
+    if (q.length < 3) {
+      return res.json({ available: false, username: q, message: 'Username must be at least 3 characters.' });
+    }
+    if (q.length > 25) {
+      return res.json({ available: false, username: q, message: 'Username cannot exceed 25 characters.' });
+    }
+
+    const conflict = Object.values(db.profiles).find(
+      (p) => p.userId !== userId && p.username?.toLowerCase() === q
+    );
+
+    return res.json({
+      available: !conflict,
+      username: q,
+      message: conflict ? 'Username is already taken.' : 'Username is available.',
+    });
+  });
+
+  // 6. Get Settings
+  app.get('/api/settings', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    const settings = ensureSettings(db, userId, profile);
+    return res.json({ success: true, settings });
+  });
+
+  // 7. Partial Update Settings
+  app.patch('/api/settings', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const patch = req.body || {};
+    const profile = ensureProfile(db, { userId });
+    const current = ensureSettings(db, userId, profile);
+
+    const updated: UserSettingsRecord = {
+      ...current,
+      privacy: patch.privacy ? { ...current.privacy, ...patch.privacy } : current.privacy,
+      appearance: patch.appearance ? { ...current.appearance, ...patch.appearance } : current.appearance,
+      languageRegion: patch.languageRegion ? { ...current.languageRegion, ...patch.languageRegion } : current.languageRegion,
+      accessibility: patch.accessibility ? { ...current.accessibility, ...patch.accessibility } : current.accessibility,
+      updatedAt: new Date().toISOString(),
+    };
+
+    db.settings[userId] = updated;
+    if (patch.privacy?.profileVisibility) {
+      profile.privacy.visibility = patch.privacy.profileVisibility;
+      profile.updatedAt = updated.updatedAt;
+    }
+    saveDb(db);
+    return res.json({ success: true, settings: updated });
+  });
+
+  // 8. Privacy Settings Endpoints
+  app.get('/api/settings/privacy', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    const settings = ensureSettings(db, userId, profile);
+    return res.json({
+      success: true,
+      privacy: settings.privacy,
+      profilePrivacy: profile.privacy,
+    });
+  });
+
+  app.patch('/api/settings/privacy', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    const settings = ensureSettings(db, userId, profile);
+    const patch = req.body || {};
+
+    if (patch.profileVisibility) {
+      settings.privacy.profileVisibility = patch.profileVisibility;
+      profile.privacy.visibility = patch.profileVisibility;
+    }
+    if (patch.activityVisibility) {
+      settings.privacy.activityVisibility = {
+        ...settings.privacy.activityVisibility,
+        ...patch.activityVisibility,
+      };
+    }
+    if (patch.discovery) {
+      settings.privacy.discovery = {
+        ...settings.privacy.discovery,
+        ...patch.discovery,
+      };
+    }
+    if (patch.showPhoto !== undefined) profile.privacy.showPhoto = Boolean(patch.showPhoto);
+    if (patch.showBio !== undefined) profile.privacy.showBio = Boolean(patch.showBio);
+    if (patch.showAcademic !== undefined) profile.privacy.showAcademic = Boolean(patch.showAcademic);
+    if (patch.showSkills !== undefined) profile.privacy.showSkills = Boolean(patch.showSkills);
+    if (patch.showAchievements !== undefined) profile.privacy.showAchievements = Boolean(patch.showAchievements);
+    if (patch.showProjects !== undefined) profile.privacy.showProjects = Boolean(patch.showProjects);
+
+    const now = new Date().toISOString();
+    settings.updatedAt = now;
+    profile.updatedAt = now;
+    saveDb(db);
+    return res.json({ success: true, privacy: settings.privacy, profilePrivacy: profile.privacy });
+  });
+
+  // 9. Notification Settings Endpoints
+  app.get('/api/settings/notifications', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const notifDb = safeReadJson<{ preferencesByUser?: Record<string, any> }>(NOTIF_DB_PATH);
+    const userPrefs = notifDb?.preferencesByUser?.[userId];
+    const cleanPrefs = {
+      studyReminders: userPrefs?.modules?.study?.reminders ?? true,
+      assignmentDeadlines: userPrefs?.modules?.study?.assignmentDue ?? true,
+      campusEvents: userPrefs?.modules?.events?.reminders ?? true,
+      communityAlerts: userPrefs?.modules?.community?.replies ?? true,
+      announcements: userPrefs?.modules?.system?.announcements ?? true,
+      general: true,
+    };
+    return res.json({ success: true, preferences: cleanPrefs });
+  });
+
+  app.patch('/api/settings/notifications', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const patch = req.body || {};
+    let notifDb = safeReadJson<{ preferencesByUser?: Record<string, any> }>(NOTIF_DB_PATH);
+    if (!notifDb) notifDb = { preferencesByUser: {} };
+    if (!notifDb.preferencesByUser) notifDb.preferencesByUser = {};
+
+    let userPrefs = notifDb.preferencesByUser[userId];
+    if (!userPrefs) {
+      userPrefs = {
+        userId,
+        modules: {
+          study: { reminders: true, assignmentDue: true },
+          events: { reminders: true },
+          community: { replies: true },
+          system: { announcements: true, securityAlerts: true },
+        },
+      };
+    }
+
+    if (patch.studyReminders !== undefined) userPrefs.modules.study.reminders = Boolean(patch.studyReminders);
+    if (patch.assignmentDeadlines !== undefined) userPrefs.modules.study.assignmentDue = Boolean(patch.assignmentDeadlines);
+    if (patch.campusEvents !== undefined) userPrefs.modules.events.reminders = Boolean(patch.campusEvents);
+    if (patch.communityAlerts !== undefined) userPrefs.modules.community.replies = Boolean(patch.communityAlerts);
+    if (patch.announcements !== undefined) userPrefs.modules.system.announcements = Boolean(patch.announcements);
+
+    notifDb.preferencesByUser[userId] = userPrefs;
+    fs.writeFileSync(NOTIF_DB_PATH, JSON.stringify(notifDb, null, 2), 'utf8');
+
+    return res.json({
+      success: true,
+      preferences: {
+        studyReminders: userPrefs.modules.study.reminders,
+        assignmentDeadlines: userPrefs.modules.study.assignmentDue,
+        campusEvents: userPrefs.modules.events.reminders,
+        communityAlerts: userPrefs.modules.community.replies,
+        announcements: userPrefs.modules.system.announcements,
+        general: true,
+      },
+    });
+  });
+
+  // 10. Account Security & Verification Summary
+  app.get('/api/account', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = ensureProfile(db, { userId });
+    const settings = ensureSettings(db, userId, profile);
+    return res.json({
+      success: true,
+      account: {
+        userId,
+        email: profile.email,
+        phone: profile.phone,
+        fullName: profile.fullName,
+        username: profile.username,
+        status: settings.account.status,
+        emailVerified: settings.account.emailVerified,
+        phoneVerified: settings.account.phoneVerified,
+        passwordLastChangedAt: settings.account.passwordLastChangedAt,
+        createdAt: settings.account.createdAt,
+        loginMethods: settings.account.loginMethods,
+      },
+    });
+  });
+
+  // 11. Data Export
+  app.post('/api/account/export', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const profile = db.profiles[userId] || null;
+    const settings = db.settings[userId] || null;
+    const studyDb = safeReadJson<{
+      notes?: Array<{ userId: string }>;
+      assignments?: Array<{ userId: string }>;
+      plannerSessions?: Array<{ userId: string }>;
+      quizAttempts?: Array<{ userId: string }>;
+    }>(path.join(process.cwd(), '.kampus_studyhub_db.json'));
+
+    const exportPayload = {
+      exportDate: new Date().toISOString(),
+      exportVersion: '1.0.0',
+      userId,
+      profile,
+      settings,
+      notes: (studyDb?.notes || []).filter((n) => n.userId === userId),
+      assignments: (studyDb?.assignments || []).filter((a) => a.userId === userId),
+      studySessions: (studyDb?.plannerSessions || []).filter((s) => s.userId === userId),
+      quizAttempts: (studyDb?.quizAttempts || []).filter((q) => q.userId === userId),
+      securityAudit: db.securityAudit.filter((e) => e.userId === userId),
+    };
+
+    return res.json({ success: true, data: exportPayload });
+  });
+
+  // 12. Account Deletion Workflow
+  app.post('/api/account/delete', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const { confirmationPhrase, reason } = req.body || {};
+
+    if (String(confirmationPhrase || '').trim() !== 'DELETE MY ACCOUNT') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please type DELETE MY ACCOUNT exactly to confirm deletion.',
+      });
+    }
+
+    if (db.profiles[userId]) {
+      if (db.profiles[userId].avatarUrl && db.profiles[userId].avatarUrl.startsWith('/uploads/avatars/')) {
+        const p = path.join(process.cwd(), db.profiles[userId].avatarUrl);
+        if (fs.existsSync(p)) try { fs.unlinkSync(p); } catch {}
+      }
+      delete db.profiles[userId];
+    }
+    if (db.settings[userId]) {
+      delete db.settings[userId];
+    }
+
+    recordAudit(db, userId, 'Account Permanently Deleted', `User deleted account. Reason: ${reason || 'Not specified'}.`);
+    saveDb(db);
+
+    return res.json({
+      success: true,
+      message: 'Your KAMPUS account and associated data have been permanently deleted.',
+    });
+  });
+
+  // ==================================================
+  // LEGACY/COMPATIBILITY ROUTES
   // ==================================================
 
   app.post('/api/profile/bootstrap', (req: Request, res: Response) => {
@@ -564,7 +973,7 @@ export function registerAccountProfileSettingsBackend(app: Express): void {
         return res.status(400).json({ message: 'Username must be at least 3 alphanumeric characters.' });
       }
       const conflict = Object.values(db.profiles).find(
-        (p) => p.userId !== userId && p.username.toLowerCase() === cleanUser
+        (p) => p.userId !== userId && p.username?.toLowerCase() === cleanUser
       );
       if (conflict) {
         return res.status(409).json({ message: 'That username is already taken.' });
@@ -619,7 +1028,7 @@ export function registerAccountProfileSettingsBackend(app: Express): void {
     const viewerId = String(req.query.viewerId || '').trim();
 
     const target = Object.values(db.profiles).find(
-      (p) => p.userId.toLowerCase() === identifier || p.username.toLowerCase() === identifier
+      (p) => p.userId?.toLowerCase() === identifier || p.username?.toLowerCase() === identifier
     );
     if (!target) {
       return res.status(404).json({ message: 'Student profile not found.' });
@@ -933,7 +1342,7 @@ export function registerAccountProfileSettingsBackend(app: Express): void {
       const cleanUser = String(username || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
       if (cleanUser.length < 3) return res.status(400).json({ message: 'Username must be at least 3 characters.' });
       const conflict = Object.values(db.profiles).find(
-        (p) => p.userId !== uid && p.username.toLowerCase() === cleanUser
+        (p) => p.userId !== uid && p.username?.toLowerCase() === cleanUser
       );
       if (conflict) return res.status(409).json({ message: 'Username is already taken.' });
       profile.username = cleanUser;

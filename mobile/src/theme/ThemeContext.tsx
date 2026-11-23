@@ -1,24 +1,56 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useColorScheme } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ColorTokens, LightColors, DarkColors } from './tokens';
+
+export type ThemePreference = 'light' | 'dark' | 'system';
 
 interface ThemeContextType {
   isDark: boolean;
-  themeMode: 'light' | 'dark';
+  themePreference: ThemePreference;
+  themeMode: 'light' | 'dark'; // for backward compatibility
   colors: ColorTokens;
   toggleTheme: () => void;
-  setThemeMode: (mode: 'light' | 'dark') => void;
+  setThemePreference: (pref: ThemePreference) => void;
+  setThemeMode: (mode: 'light' | 'dark') => void; // for backward compatibility
   updateAdminColors: (adminColors: Partial<ColorTokens>) => void;
 }
+
+const THEME_STORAGE_KEY = '@kampus_theme_preference';
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const systemScheme = useColorScheme();
-  const [themeMode, setThemeMode] = useState<'light' | 'dark'>(systemScheme === 'dark' ? 'dark' : 'light');
+  const [themePreference, setThemePreferenceState] = useState<ThemePreference>('system');
   const [adminColorOverrides, setAdminColorOverrides] = useState<Partial<ColorTokens>>({});
 
-  const isDark = themeMode === 'dark';
+  useEffect(() => {
+    // Load persisted theme preference on launch
+    AsyncStorage.getItem(THEME_STORAGE_KEY)
+      .then((saved) => {
+        if (saved === 'light' || saved === 'dark' || saved === 'system') {
+          setThemePreferenceState(saved);
+        }
+      })
+      .catch((err) => console.warn('[ThemeContext] Failed to load theme preference:', err));
+  }, []);
+
+  const setThemePreference = (pref: ThemePreference) => {
+    setThemePreferenceState(pref);
+    AsyncStorage.setItem(THEME_STORAGE_KEY, pref).catch(() => {});
+  };
+
+  const setThemeMode = (mode: 'light' | 'dark') => {
+    setThemePreference(mode);
+  };
+
+  // Determine actual theme (light or dark)
+  const isDark =
+    themePreference === 'system'
+      ? systemScheme === 'dark'
+      : themePreference === 'dark';
+
   const baseColors = isDark ? DarkColors : LightColors;
   const colors: ColorTokens = {
     ...baseColors,
@@ -26,7 +58,8 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const toggleTheme = () => {
-    setThemeMode((prev) => (prev === 'light' ? 'dark' : 'light'));
+    const next = isDark ? 'light' : 'dark';
+    setThemePreference(next);
   };
 
   const updateAdminColors = (custom: Partial<ColorTokens>) => {
@@ -37,9 +70,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     <ThemeContext.Provider
       value={{
         isDark,
-        themeMode,
+        themePreference,
+        themeMode: isDark ? 'dark' : 'light',
         colors,
         toggleTheme,
+        setThemePreference,
         setThemeMode,
         updateAdminColors,
       }}

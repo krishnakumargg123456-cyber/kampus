@@ -547,7 +547,7 @@ export const HomeScreen = ({ navigation }: any) => {
           {/* Student Profile Avatar with Online Dot */}
           <TouchableOpacity
             style={styles.profileAvatarBtn}
-            onPress={() => navigation.navigate('KampusId')}
+            onPress={() => navigation.navigate('Profile')}
             activeOpacity={0.85}
           >
             <Image

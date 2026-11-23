@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   ChevronRight,
   Sparkles,
+  User,
 } from 'lucide-react-native';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
@@ -63,16 +64,23 @@ export const MoreScreen = ({ navigation }: any) => {
       route: 'StudentToolkit',
     },
     {
+      id: 'student_profile',
+      title: '9. Student Profile',
+      subtitle: 'Academic details, bio, interests & badges',
+      icon: <User size={22} color="#38bdf8" />,
+      route: 'Profile',
+    },
+    {
       id: 'kampus_id',
-      title: '9. KAMPUS ID & Profile',
+      title: '10. KAMPUS ID Card',
       subtitle: 'Digital student identity card & QR verify',
       icon: <CreditCard size={22} color="#ec4899" />,
       route: 'KampusId',
     },
     {
       id: 'settings',
-      title: '10. Settings & Privacy',
-      subtitle: 'Security, active sessions, dark theme & DPDP',
+      title: '11. Settings & Privacy',
+      subtitle: 'Security, appearance, notifications & data export',
       icon: <Settings size={22} color={colors.textSecondary} />,
       route: 'Settings',
     },
