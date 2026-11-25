@@ -30,7 +30,7 @@ export interface NotificationFeedItem extends NotificationRecord {
   type: 'academic' | 'campus' | 'career' | 'system';
 }
 
-export interface AddNotificationInput extends Omit<NotificationItem, 'id' | 'read'> {
+export interface AddNotificationInput extends Omit<NotificationItem, 'id' | 'read' | 'priority'> {
   category?: NotificationCategory;
   priority?: NotificationPriority;
   sourceModule?: string;

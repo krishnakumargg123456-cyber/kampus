@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import jwt from 'jsonwebtoken';
 import { WebSocket, WebSocketServer } from 'ws';
 import type {
   AggregatedReminder,
@@ -974,8 +975,9 @@ export function registerNotificationsBackend(app: Express): WebSocketServer {
   });
 
   // 3. Single Notification Update (Read/Unread, Archive, Important, Soft-Delete)
-  app.patch('/api/notifications/:id', (req: Request, res: Response) => {
+  app.patch('/api/notifications/:id', (req: Request, res: Response, next) => {
     const { id } = req.params;
+    if (id === 'read-all') return next();
     const { userId, read, archived, important, deleted } = req.body || {};
     const uid = String(userId || '').trim();
     const item = db.notifications.find((n) => n.id === id);
@@ -1310,5 +1312,333 @@ export function registerNotificationsBackend(app: Express): WebSocketServer {
     return res.json({ announcement: ann });
   });
 
+  // Helper to extract authenticated user
+  const getUid = (req: Request): string => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.decode(token) as any;
+        if (decoded && (decoded.sub || decoded.userId)) {
+          return decoded.sub || decoded.userId;
+        }
+      } catch {}
+    }
+    const headerUserId = req.headers['x-user-id'] || req.headers['x-clerk-user-id'];
+    if (headerUserId && typeof headerUserId === 'string' && headerUserId.trim().length > 0) {
+      return headerUserId.trim();
+    }
+    const queryUid = req.query.userId || req.body?.userId;
+    if (queryUid && typeof queryUid === 'string' && queryUid.trim().length > 0) {
+      return queryUid.trim();
+    }
+    return 'student_default';
+  };
+
+  // Helper to seed realistic default notifications if user has 0 items
+  const seedDefaultNotificationsForUser = (uid: string) => {
+    const existing = db.notifications.filter((n) => n.userId === uid && !n.deleted);
+    if (existing.length > 0) return;
+
+    const now = Date.now();
+    const sampleNotifications: Array<{
+      title: string;
+      description: string;
+      details?: string;
+      category: NotificationCategory;
+      priority: NotificationPriority;
+      linkRoute?: string;
+      actionLabel?: string;
+      timeOffsetMs: number;
+    }> = [
+      {
+        title: 'End-Sem Examination Schedule Published',
+        description: 'Dean of Academic Affairs has released the official timetable & hall seating distribution.',
+        details: 'All students are requested to verify their course registration slips and report any slot clashes to exam@kampus.edu by Friday.',
+        category: 'Academic',
+        priority: 'Important',
+        linkRoute: 'StudyHub',
+        actionLabel: 'View Schedule',
+        timeOffsetMs: 15 * 60 * 1000,
+      },
+      {
+        title: 'Flagship Hackathon 2026: CodeWave Registration',
+        description: 'Annual hackathon is now live! ₹2,50,000 prize pool, cloud credits & mentorship from Google DSC.',
+        details: 'Team formation open up to 4 members. Early bird registration ends Sunday at midnight.',
+        category: 'Campus',
+        priority: 'Urgent',
+        linkRoute: 'CampusLife',
+        actionLabel: 'Register Now',
+        timeOffsetMs: 2 * 3600 * 1000,
+      },
+      {
+        title: 'New Study Group Active: CS Algorithms & LeetCode',
+        description: 'Rohan Verma shared detailed solutions for Dynamic Programming on Trees.',
+        category: 'Community',
+        priority: 'Normal',
+        linkRoute: 'Community',
+        actionLabel: 'Join Discussion',
+        timeOffsetMs: 5 * 3600 * 1000,
+      },
+      {
+        title: 'Order Confirmed: Casio fx-991EX Scientific Calculator',
+        description: 'Seller Kavita Joshi accepted your order. Meetup scheduled at Central Library foyer.',
+        category: 'Market',
+        priority: 'Important',
+        linkRoute: 'Market',
+        actionLabel: 'Track Order',
+        timeOffsetMs: 24 * 3600 * 1000,
+      },
+      {
+        title: 'Welcome to KAMPUS Digital Identity',
+        description: 'Complete your student profile to unlock verified digital student ID card & campus perks.',
+        category: 'System',
+        priority: 'Low',
+        linkRoute: 'Profile',
+        actionLabel: 'Edit Profile',
+        timeOffsetMs: 48 * 3600 * 1000,
+      },
+      {
+        title: 'Pre-Placement Talk: Google Cloud & Microsoft',
+        description: 'Career Services invites 3rd and 4th year scholars for interactive roadmap session tomorrow at 4 PM.',
+        category: 'Career',
+        priority: 'Important',
+        linkRoute: 'Career',
+        actionLabel: 'View Details',
+        timeOffsetMs: 72 * 3600 * 1000,
+      },
+    ];
+
+    for (const s of sampleNotifications) {
+      const createdAt = new Date(now - s.timeOffsetMs).toISOString();
+      db.notifications.push({
+        id: `notif_${crypto.randomUUID().slice(0, 10)}`,
+        userId: uid,
+        title: s.title,
+        description: s.description,
+        details: s.details,
+        category: s.category,
+        subType: 'announcement',
+        sourceModule: 'system',
+        priority: s.priority,
+        read: s.timeOffsetMs > 24 * 3600 * 1000,
+        archived: false,
+        deleted: false,
+        deletedAt: null,
+        important: s.priority === 'Urgent' || s.priority === 'Important',
+        isMention: false,
+        isReminder: false,
+        linkRoute: s.linkRoute,
+        actionLabel: s.actionLabel || 'Open',
+        suppressedByQuietHours: false,
+        deliveryRecords: [],
+        createdAt,
+        updatedAt: createdAt,
+      });
+    }
+    saveDb(db);
+  };
+
+  // 13. REST List Notifications (Filtered, Sorted, Paginated)
+  app.get('/api/notifications', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    promoteScheduledAnnouncements();
+    ensurePreferences(db, uid);
+    seedDefaultNotificationsForUser(uid);
+
+    const category = req.query.category ? String(req.query.category).trim() : null;
+    const unreadOnly = req.query.unreadOnly === 'true' || req.query.unread === 'true';
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const page = Math.max(1, Number(req.query.page) || 1);
+
+    let list = db.notifications
+      .filter((n) => n.userId === uid && !n.deleted && !n.archived)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    const totalUnread = list.filter((n) => !n.read).length;
+
+    if (category && category !== 'All') {
+      list = list.filter((n) => n.category.toLowerCase() === category.toLowerCase());
+    }
+    if (unreadOnly) {
+      list = list.filter((n) => !n.read);
+    }
+
+    const total = list.length;
+    const paginated = list.slice((page - 1) * limit, page * limit);
+
+    return res.json({
+      notifications: paginated,
+      unreadCount: totalUnread,
+      total,
+      page,
+      limit,
+      preferences: db.preferencesByUser[uid] || null,
+    });
+  });
+
+  // 14. Quick Unread Count
+  app.get('/api/notifications/unread-count', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    seedDefaultNotificationsForUser(uid);
+    const unread = db.notifications.filter(
+      (n) => n.userId === uid && !n.read && !n.deleted && !n.archived
+    ).length;
+    return res.json({ unreadCount: unread, count: unread });
+  });
+
+  // 15. Single Mark-as-Read
+  app.patch('/api/notifications/:id/read', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const uid = getUid(req);
+    const notif = db.notifications.find((n) => n.id === id);
+    if (!notif) return res.status(404).json({ message: 'Notification not found.' });
+    if (notif.userId !== uid) return res.status(403).json({ message: 'Unauthorized.' });
+
+    notif.read = true;
+    notif.updatedAt = new Date().toISOString();
+    saveDb(db);
+
+    emitToUser(uid, { type: 'notification:updated', notification: notif });
+    return res.json({ success: true, notification: notif });
+  });
+
+  // 16. Mark All Read
+  app.patch('/api/notifications/read-all', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+    for (const n of db.notifications) {
+      if (n.userId === uid && !n.read && !n.deleted) {
+        n.read = true;
+        n.updatedAt = now;
+        updatedCount += 1;
+      }
+    }
+    saveDb(db);
+    emitToUser(uid, { type: 'notification:all-read', count: updatedCount });
+    return res.json({ success: true, updatedCount });
+  });
+
+  // 17. Delete Single Notification
+  app.delete('/api/notifications/:id', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const uid = getUid(req);
+    const notif = db.notifications.find((n) => n.id === id);
+    if (!notif) return res.status(404).json({ message: 'Notification not found.' });
+    if (notif.userId !== uid) return res.status(403).json({ message: 'Unauthorized.' });
+
+    notif.deleted = true;
+    notif.deletedAt = new Date().toISOString();
+    notif.updatedAt = notif.deletedAt;
+    saveDb(db);
+
+    emitToUser(uid, { type: 'notification:deleted', id });
+    return res.json({ success: true, id });
+  });
+
+  // 18. Clear All Notifications
+  app.delete('/api/notifications', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    const now = new Date().toISOString();
+    let clearedCount = 0;
+    for (const n of db.notifications) {
+      if (n.userId === uid && !n.deleted) {
+        n.deleted = true;
+        n.deletedAt = now;
+        n.updatedAt = now;
+        clearedCount += 1;
+      }
+    }
+    saveDb(db);
+    return res.json({ success: true, clearedCount });
+  });
+
+  // 19. Get Preferences
+  app.get('/api/notifications/preferences', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    const prefs = ensurePreferences(db, uid);
+    return res.json({ preferences: prefs });
+  });
+
+  // 20. Register Push Token (Mobile Expo / FCM)
+  app.post('/api/notifications/push-token', (req: Request, res: Response) => {
+    const uid = getUid(req);
+    const { token, platform } = req.body || {};
+    if (!token) return res.status(400).json({ message: 'Token is required.' });
+
+    const existingIdx = db.pushSubscriptions.findIndex((s) => s.userId === uid && (s as any).deviceToken === token);
+    const now = new Date().toISOString();
+    if (existingIdx >= 0) {
+      db.pushSubscriptions[existingIdx].updatedAt = now;
+    } else {
+      db.pushSubscriptions.push({
+        id: `sub_${crypto.randomUUID().slice(0, 8)}`,
+        userId: uid,
+        endpointLabel: token,
+        deviceLabel: platform ? `${platform} Device` : 'Mobile Device',
+        permissionState: 'granted',
+        platform: platform || 'mobile',
+        active: true,
+        updatedAt: now,
+      });
+    }
+    saveDb(db);
+    return res.json({ success: true, registered: true });
+  });
+
+  // Store global emitter for server-side dispatch
+  (globalThis as any).__kampusEmitToUser = emitToUser;
+
   return wss;
+}
+
+// Global server-side notification dispatcher
+export function dispatchNotification(params: {
+  userId: string;
+  title: string;
+  description: string;
+  details?: string;
+  category?: NotificationCategory;
+  priority?: NotificationPriority;
+  linkRoute?: string;
+  actionLabel?: string;
+  sourceModule?: string;
+  important?: boolean;
+}): NotificationRecord {
+  const db = loadDb();
+  const userId = params.userId || 'student_default';
+  const now = new Date().toISOString();
+  const notif: NotificationRecord = {
+    id: `notif_${crypto.randomUUID().slice(0, 10)}`,
+    userId,
+    title: params.title,
+    description: params.description,
+    details: params.details,
+    category: params.category || 'Campus',
+    subType: 'direct_alert',
+    sourceModule: params.sourceModule || 'system',
+    priority: params.priority || 'Normal',
+    read: false,
+    archived: false,
+    deleted: false,
+    deletedAt: null,
+    important: Boolean(params.important),
+    isMention: false,
+    isReminder: false,
+    linkRoute: params.linkRoute,
+    actionLabel: params.actionLabel || 'View',
+    suppressedByQuietHours: false,
+    deliveryRecords: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.notifications.unshift(notif);
+  saveDb(db);
+
+  if (typeof (globalThis as any).__kampusEmitToUser === 'function') {
+    (globalThis as any).__kampusEmitToUser(userId, { type: 'notification:created', notification: notif });
+  }
+
+  return notif;
 }

@@ -55,6 +55,7 @@ import {
 } from 'lucide-react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import { notificationsApi } from '../services/notificationsApi';
 import { Spacing, BorderRadius, Typography, Shadows } from '../theme/tokens';
 
 const PADDING_HORIZONTAL = 20;
@@ -121,9 +122,21 @@ export const HomeScreen = ({ navigation }: any) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   const [modulesViewMode, setModulesViewMode] = useState<'slider' | 'grid'>('slider');
+  const [unreadNotifs, setUnreadNotifs] = useState(0);
 
   const heroScrollRef = useRef<ScrollView>(null);
   const isInteractingWithHeroRef = useRef(false);
+
+  const loadUnreadCount = React.useCallback(async () => {
+    try {
+      const c = await notificationsApi.getUnreadCount(null, user?.userId);
+      setUnreadNotifs(c);
+    } catch {}
+  }, [user?.userId]);
+
+  useEffect(() => {
+    loadUnreadCount();
+  }, [loadUnreadCount]);
 
   // Time-based student greeting
   const getGreeting = () => {
@@ -139,8 +152,9 @@ export const HomeScreen = ({ navigation }: any) => {
 
   const onRefresh = React.useCallback(() => {
     setRefreshing(true);
+    loadUnreadCount();
     setTimeout(() => setRefreshing(false), 800);
-  }, []);
+  }, [loadUnreadCount]);
 
   // 4 Premium Hero Slides with relevant university imagery
   const heroSlides = [
@@ -535,13 +549,17 @@ export const HomeScreen = ({ navigation }: any) => {
           {/* Notification Button with Badge */}
           <TouchableOpacity
             style={styles.notificationBtn}
-            onPress={() => navigation.navigate('More', { screen: 'Notifications' })}
+            onPress={() => navigation.navigate('Notifications')}
             activeOpacity={0.7}
           >
             <Bell size={20} color="#f8fafc" />
-            <View style={styles.notificationBadge}>
-              <Text style={styles.notificationBadgeText}>3</Text>
-            </View>
+            {unreadNotifs > 0 && (
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>
+                  {unreadNotifs > 9 ? '9+' : unreadNotifs}
+                </Text>
+              </View>
+            )}
           </TouchableOpacity>
 
           {/* Student Profile Avatar with Online Dot */}

@@ -3,14 +3,16 @@ export type NotificationCategory =
   | 'Community'
   | 'Chat'
   | 'Events & Clubs'
+  | 'Campus'
   | 'Career'
   | 'College Explorer'
   | 'KAMPUS Market'
+  | 'Market'
   | 'Digital Locker'
   | 'KAMPUS Rewards'
   | 'System';
 
-export type NotificationPriority = 'Urgent' | 'High' | 'Normal' | 'Low';
+export type NotificationPriority = 'Urgent' | 'High' | 'Important' | 'Normal' | 'Low';
 
 export type DeliveryChannel = 'in_app' | 'push' | 'email' | 'sms';
 
@@ -133,6 +135,7 @@ export interface PushSubscriptionRecord {
   id: string;
   userId: string;
   endpointLabel: string;
+  deviceLabel?: string;
   permissionState: 'granted' | 'denied' | 'default' | 'unsupported';
   platform: string;
   active: boolean;

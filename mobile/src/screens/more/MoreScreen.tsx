@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Sparkles,
   User,
+  Bell,
 } from 'lucide-react-native';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
@@ -28,6 +29,13 @@ export const MoreScreen = ({ navigation }: any) => {
   const { user } = useAuth();
 
   const MORE_ITEMS = [
+    {
+      id: 'notifications',
+      title: '3. Notification Center',
+      subtitle: 'Campus alerts, circulars, exam notices & deadlines',
+      icon: <Bell size={22} color="#0284c7" />,
+      route: 'Notifications',
+    },
     {
       id: 'campus_life',
       title: '4. Campus Life',

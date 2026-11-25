@@ -102,10 +102,10 @@ export async function initializeDatabase(): Promise<void> {
   console.log('[Database] Initializing KAMPUS database engine...');
 
   if (!pool) {
-    if (isProduction) {
+    if (isProduction && !process.env.ALLOW_OFFLINE_DB) {
       throw new Error('Fatal: PostgreSQL pool is required in production but could not be initialized.');
     }
-    console.log('[Database Dev]: PostgreSQL not configured. Operating in High-Resilience File-Store & JSON Sync Mode.');
+    console.log('[Database]: Operating in High-Resilience File-Store & JSON Sync Mode.');
     isPostgresReady = false;
     return;
   }
@@ -139,10 +139,10 @@ export async function initializeDatabase(): Promise<void> {
       client.release();
     }
   } catch (err: any) {
-    if (isProduction) {
+    if (isProduction && !process.env.ALLOW_OFFLINE_DB) {
       throw new Error(`Fatal: Production PostgreSQL connection failed: ${err.message}`);
     }
-    console.warn('[Database Dev]: PostgreSQL connection failed (will run in resilient file mode):', err.message);
+    console.warn('[Database Resilient Mode]: PostgreSQL connection failed, falling back to local module store:', err.message);
     isPostgresReady = false;
   }
 }

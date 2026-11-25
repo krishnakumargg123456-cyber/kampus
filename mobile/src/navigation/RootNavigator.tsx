@@ -22,6 +22,7 @@ import { KampusIdScreen } from '../screens/id/KampusIdScreen';
 import { ProfileScreen } from '../screens/profile/ProfileScreen';
 import { EditProfileScreen } from '../screens/profile/EditProfileScreen';
 import { SettingsScreen } from '../screens/settings/SettingsScreen';
+import { NotificationsScreen } from '../screens/notifications/NotificationsScreen';
 import { AdminDashboardScreen } from '../screens/admin/AdminDashboardScreen';
 import { useAuth } from '../context/AuthContext';
 
@@ -61,6 +62,7 @@ export const RootNavigator = () => {
           <Stack.Screen name="Profile" component={ProfileScreen} />
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
           <Stack.Screen name="Settings" component={SettingsScreen} />
+          <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="AdminDashboard" component={AdminDashboardScreen} />
         </Stack.Group>
       )}

@@ -31,6 +31,7 @@ import { registerCommunityBackend } from './server/communityBackend.ts';
 import { registerNotesExchangeBackend } from './server/notesExchangeBackend.ts';
 import { registerStudyPartnerBackend } from './server/studyPartnerBackend.ts';
 import { registerKampusAiBackend } from './server/kampusAiBackend.ts';
+import { registerCampusLifeBackend } from './server/campusLifeBackend.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -168,6 +169,7 @@ async function startServer() {
   registerSkillSwapBackend(app);
   registerCampusPulseBackend(app);
   registerEventsClubsBackend(app);
+  registerCampusLifeBackend(app);
   registerKampusIdBackend(app);
   registerCareerBackend(app);
   registerStudentVoiceBackend(app);

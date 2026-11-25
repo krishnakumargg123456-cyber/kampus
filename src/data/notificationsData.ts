@@ -56,6 +56,12 @@ export const CATEGORY_META: Record<
     borderClass: 'border-emerald-200 dark:border-emerald-800',
     defaultRoute: '/campus/events-clubs',
   },
+  Campus: {
+    colorClass: 'text-emerald-600 dark:text-emerald-400',
+    bgClass: 'bg-emerald-50 dark:bg-emerald-950/40',
+    borderClass: 'border-emerald-200 dark:border-emerald-800',
+    defaultRoute: '/campus/events-clubs',
+  },
   Career: {
     colorClass: 'text-amber-600 dark:text-amber-400',
     bgClass: 'bg-amber-50 dark:bg-amber-950/40',
@@ -69,6 +75,12 @@ export const CATEGORY_META: Record<
     defaultRoute: '/campus/college-explorer',
   },
   'KAMPUS Market': {
+    colorClass: 'text-orange-600 dark:text-orange-400',
+    bgClass: 'bg-orange-50 dark:bg-orange-950/40',
+    borderClass: 'border-orange-200 dark:border-orange-800',
+    defaultRoute: '/market',
+  },
+  Market: {
     colorClass: 'text-orange-600 dark:text-orange-400',
     bgClass: 'bg-orange-50 dark:bg-orange-950/40',
     borderClass: 'border-orange-200 dark:border-orange-800',
