@@ -663,6 +663,12 @@ export function registerAuthBackend(app: Express): void {
         return;
       }
 
+      if (!db.credentials) db.credentials = {};
+      if (effectivePasswordHash && !db.credentials[profile.userId]) {
+        db.credentials[profile.userId] = { passwordHash: effectivePasswordHash, lastChangedAt: new Date().toISOString() };
+        saveAccountDb(db);
+      }
+
       const isPasswordValid = await bcrypt.compare(password, effectivePasswordHash);
 
       if (!isPasswordValid) {

@@ -1026,6 +1026,11 @@ function registerAuthBackend(app) {
         });
         return;
       }
+      if (!db.credentials) db.credentials = {};
+      if (effectivePasswordHash && !db.credentials[profile.userId]) {
+        db.credentials[profile.userId] = { passwordHash: effectivePasswordHash, lastChangedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        saveAccountDb(db);
+      }
       const isPasswordValid = await bcrypt.compare(password, effectivePasswordHash);
       if (!isPasswordValid) {
         res.status(401).json({ success: false, error: "Invalid password. Please check and try again." });
@@ -17797,6 +17802,7 @@ function createEmptyDb3() {
   return {
     profiles: {},
     settings: {},
+    credentials: {},
     sessions: [],
     securityAudit: [],
     reports: [],
@@ -17813,7 +17819,11 @@ var accountStorage2 = new ModuleStorage(
   () => createEmptyDb3()
 );
 function loadDb13() {
-  return accountStorage2.get();
+  const db = accountStorage2.get();
+  if (!db.credentials) {
+    db.credentials = {};
+  }
+  return db;
 }
 function saveDb13(db) {
   accountStorage2.saveSync(db);
@@ -22388,8 +22398,8 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Note not found." });
         return;
       }
-      if (db.notes[idx].userId !== userId && db.notes[idx].userId !== "global_sample") {
-        res.status(403).json({ success: false, error: "Unauthorized to modify this note." });
+      if (db.notes[idx].userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to modify this note. Only note owner can edit." });
         return;
       }
       const existing = db.notes[idx];
@@ -22436,8 +22446,8 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Note not found." });
         return;
       }
-      if (note.userId !== userId && note.userId !== "global_sample") {
-        res.status(403).json({ success: false, error: "Unauthorized to delete this note." });
+      if (note.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to delete this note. Only note owner can delete." });
         return;
       }
       db.notes = db.notes.filter((n) => n.id !== id);
@@ -22650,8 +22660,8 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Assignment not found." });
         return;
       }
-      if (db.assignments[idx].userId !== userId && db.assignments[idx].userId !== "global_sample") {
-        res.status(403).json({ success: false, error: "Unauthorized to update this assignment." });
+      if (db.assignments[idx].userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to update this assignment. Only owner can edit." });
         return;
       }
       const existing = db.assignments[idx];
@@ -22685,6 +22695,10 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Assignment not found." });
         return;
       }
+      if (asgn.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to update this assignment." });
+        return;
+      }
       const targetStatus = status || (asgn.status === "Completed" ? "Pending" : "Completed");
       asgn.status = targetStatus;
       asgn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -22709,8 +22723,8 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Assignment not found." });
         return;
       }
-      if (asgn.userId !== userId && asgn.userId !== "global_sample") {
-        res.status(403).json({ success: false, error: "Unauthorized to delete this assignment." });
+      if (asgn.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to delete this assignment. Only owner can delete." });
         return;
       }
       db.assignments = db.assignments.filter((a) => a.id !== id);
@@ -22800,11 +22814,20 @@ function registerStudyHubBackend(app) {
   });
   app.patch("/api/studyhub/planner/sessions/:id/complete", (req, res) => {
     try {
+      const userId = getAuthenticatedUserId2(req);
       const { id } = req.params;
       const db = loadDb15();
       const sess = db.plannerSessions.find((s) => s.id === id);
       if (!sess) {
         res.status(404).json({ success: false, error: "Study session not found." });
+        return;
+      }
+      if (sess.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to delete this session. Only owner can delete." });
+        return;
+      }
+      if (sess.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to complete this session. Only owner can update." });
         return;
       }
       sess.status = sess.status === "Completed" ? "Scheduled" : "Completed";
@@ -22823,6 +22846,10 @@ function registerStudyHubBackend(app) {
       const sess = db.plannerSessions.find((s) => s.id === id);
       if (!sess) {
         res.status(404).json({ success: false, error: "Study session not found." });
+        return;
+      }
+      if (sess.userId !== userId) {
+        res.status(403).json({ success: false, error: "Unauthorized to delete this session. Only owner can delete." });
         return;
       }
       if (sess.userId !== userId && sess.userId !== "global_sample") {
@@ -23103,6 +23130,243 @@ function registerStudyHubBackend(app) {
           }
         }
       });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  function isUserAdmin(userId, req) {
+    if (req.headers["x-admin-role"] === "super_admin" || req.headers["x-admin-role"] === "admin") return true;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      try {
+        const decoded = jwt4.decode(authHeader.split(" ")[1]);
+        if (decoded?.role === "admin" || decoded?.role === "super_admin") return true;
+      } catch {
+      }
+    }
+    try {
+      const accPath = path20.join(process.cwd(), ".kampus_account_db.json");
+      if (fs13.existsSync(accPath)) {
+        const acc = JSON.parse(fs13.readFileSync(accPath, "utf-8"));
+        if (acc.modRoleOverrides?.[userId]?.role === "Moderator Admin") return true;
+      }
+    } catch {
+    }
+    return false;
+  }
+  app.get("/api/studyhub/subjects", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const db = loadDb15();
+      const allSubjects = Array.isArray(db.subjects) ? db.subjects : [];
+      const visibleSubjects = allSubjects.filter(
+        (s) => s.isCommon === true || !s.ownerId || s.ownerId === userId
+      );
+      res.json({
+        success: true,
+        count: visibleSubjects.length,
+        data: visibleSubjects
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  app.post("/api/studyhub/subjects", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const { code, name, level, course, semesterOrClass, description, isCommon } = req.body || {};
+      const db = loadDb15();
+      if (!Array.isArray(db.subjects)) db.subjects = [];
+      if (!name || !String(name).trim()) {
+        res.status(400).json({ success: false, error: "Subject name is required." });
+        return;
+      }
+      const isAdmin = isUserAdmin(userId, req);
+      const createCommon = Boolean(isCommon) && isAdmin;
+      if (isCommon && !isAdmin) {
+        res.status(403).json({
+          success: false,
+          error: "Only authorized administrators can create common shared subjects."
+        });
+        return;
+      }
+      const newSubject = {
+        id: `subj_${Date.now()}_${crypto12.randomBytes(4).toString("hex")}`,
+        code: String(code || "").trim(),
+        name: String(name).trim(),
+        level: level || "Undergraduate",
+        course: String(course || "").trim(),
+        semesterOrClass: String(semesterOrClass || "1").trim(),
+        description: String(description || "").trim(),
+        imageUrl: "",
+        accentColor: "blue",
+        chapters: [],
+        isCustom: !createCommon,
+        isCommon: createCommon,
+        ownerId: createCommon ? null : userId,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastAccessedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      db.subjects.push(newSubject);
+      saveDb15(db);
+      res.status(201).json({ success: true, data: newSubject });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  app.put("/api/studyhub/subjects/:id", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const { id } = req.params;
+      const updates = req.body || {};
+      const db = loadDb15();
+      if (!Array.isArray(db.subjects)) db.subjects = [];
+      const idx = db.subjects.findIndex((s) => s.id === id);
+      if (idx === -1) {
+        res.status(404).json({ success: false, error: "Subject not found." });
+        return;
+      }
+      const subj = db.subjects[idx];
+      const isAdmin = isUserAdmin(userId, req);
+      if (subj.isCommon || !subj.ownerId) {
+        if (!isAdmin) {
+          res.status(403).json({
+            success: false,
+            error: "Common subjects cannot be edited by students. Admin authorization required."
+          });
+          return;
+        }
+      } else if (subj.ownerId !== userId) {
+        res.status(403).json({
+          success: false,
+          error: "Unauthorized to modify this personal subject. Only the owner can edit."
+        });
+        return;
+      }
+      db.subjects[idx] = {
+        ...subj,
+        name: updates.name !== void 0 ? String(updates.name).trim() : subj.name,
+        code: updates.code !== void 0 ? String(updates.code).trim() : subj.code,
+        description: updates.description !== void 0 ? String(updates.description).trim() : subj.description,
+        course: updates.course !== void 0 ? String(updates.course).trim() : subj.course,
+        semesterOrClass: updates.semesterOrClass !== void 0 ? String(updates.semesterOrClass).trim() : subj.semesterOrClass,
+        chapters: Array.isArray(updates.chapters) ? updates.chapters : subj.chapters,
+        lastAccessedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      saveDb15(db);
+      res.json({ success: true, data: db.subjects[idx] });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  app.delete("/api/studyhub/subjects/:id", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const { id } = req.params;
+      const db = loadDb15();
+      if (!Array.isArray(db.subjects)) db.subjects = [];
+      const subj = db.subjects.find((s) => s.id === id);
+      if (!subj) {
+        res.status(404).json({ success: false, error: "Subject not found." });
+        return;
+      }
+      const isAdmin = isUserAdmin(userId, req);
+      if (subj.isCommon || !subj.ownerId) {
+        if (!isAdmin) {
+          res.status(403).json({
+            success: false,
+            error: "Common subjects cannot be deleted by students. Admin authorization required."
+          });
+          return;
+        }
+      } else if (subj.ownerId !== userId) {
+        res.status(403).json({
+          success: false,
+          error: "Unauthorized to delete this personal subject. Only the owner can delete."
+        });
+        return;
+      }
+      db.subjects = db.subjects.filter((s) => s.id !== id);
+      saveDb15(db);
+      res.json({ success: true, message: "Subject deleted successfully." });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  app.get("/api/studyhub/bootstrap", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const db = loadDb15();
+      const userNotes = db.notes.filter((n) => n.userId === userId);
+      const userMaterials = db.materials.filter((m) => m.isPublic || m.userId === userId);
+      const userAssignments = db.assignments.filter((a) => a.userId === userId);
+      const userSessions = db.plannerSessions.filter((s) => s.userId === userId);
+      const userQuizzes = db.quizAttempts.filter((q) => q.userId === userId);
+      const allSubjects = Array.isArray(db.subjects) ? db.subjects : [];
+      const visibleSubjects = allSubjects.filter(
+        (s) => s.isCommon === true || !s.ownerId || s.ownerId === userId
+      );
+      const userUploads = Array.isArray(db.uploads) ? db.uploads.filter((u) => u.userId === userId || !u.userId) : [];
+      const userReminders = Array.isArray(db.reminders) ? db.reminders.filter((r) => r.userId === userId) : [];
+      res.json({
+        success: true,
+        data: {
+          subjects: visibleSubjects,
+          notes: userNotes,
+          materials: userMaterials,
+          assignments: userAssignments,
+          plannerSessions: userSessions,
+          quizAttempts: userQuizzes,
+          uploads: userUploads,
+          reminders: userReminders,
+          papers: db.papers || [],
+          questions: db.questions || []
+        }
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  app.post("/api/studyhub/sync", (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId2(req);
+      const incoming = req.body || {};
+      const db = loadDb15();
+      if (Array.isArray(incoming.notes)) {
+        incoming.notes.forEach((incNote) => {
+          if (!incNote.id) return;
+          const idx = db.notes.findIndex((n) => n.id === incNote.id);
+          if (idx !== -1) {
+            if (db.notes[idx].userId === userId) {
+              db.notes[idx] = { ...db.notes[idx], ...incNote, userId };
+            }
+          } else {
+            db.notes.push({ ...incNote, userId });
+          }
+        });
+      }
+      if (Array.isArray(incoming.assignments)) {
+        incoming.assignments.forEach((incAsgn) => {
+          if (!incAsgn.id) return;
+          const idx = db.assignments.findIndex((a) => a.id === incAsgn.id);
+          if (idx !== -1) {
+            if (db.assignments[idx].userId === userId) {
+              db.assignments[idx] = { ...db.assignments[idx], ...incAsgn, userId };
+            }
+          } else {
+            db.assignments.push({ ...incAsgn, userId });
+          }
+        });
+      }
+      if (Array.isArray(incoming.reminders)) {
+        if (!Array.isArray(db.reminders)) db.reminders = [];
+        db.reminders = db.reminders.filter((r) => r.userId !== userId);
+        incoming.reminders.forEach((r) => {
+          db.reminders.push({ ...r, userId });
+        });
+      }
+      saveDb15(db);
+      res.json({ success: true, message: "Study Hub state synchronized successfully." });
     } catch (err) {
       res.status(500).json({ success: false, error: err.message });
     }

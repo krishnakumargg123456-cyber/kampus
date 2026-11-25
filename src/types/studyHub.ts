@@ -75,6 +75,8 @@ export interface StudySubject {
   accentColor: 'blue' | 'orange' | 'emerald' | 'indigo' | 'slate';
   chapters: StudyChapter[];
   isCustom?: boolean;
+  isCommon?: boolean;
+  ownerId?: string | null;
   lastAccessedAt: string;
 }
 

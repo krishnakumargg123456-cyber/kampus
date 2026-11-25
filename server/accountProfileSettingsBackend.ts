@@ -24,6 +24,7 @@ import type {
 interface AccountDatabase {
   profiles: Record<string, StudentProfileRecord>;
   settings: Record<string, UserSettingsRecord>;
+  credentials?: Record<string, { passwordHash: string; lastChangedAt?: string; salt?: string }>;
   sessions: SessionRecord[];
   securityAudit: SecurityAuditEvent[];
   reports: ProfileReportRecord[];
@@ -74,6 +75,7 @@ function createEmptyDb(): AccountDatabase {
   return {
     profiles: {},
     settings: {},
+    credentials: {},
     sessions: [],
     securityAudit: [],
     reports: [],
@@ -92,7 +94,11 @@ const accountStorage = new ModuleStorage<AccountDatabase>(
 );
 
 function loadDb(): AccountDatabase {
-  return accountStorage.get();
+  const db = accountStorage.get();
+  if (!db.credentials) {
+    db.credentials = {};
+  }
+  return db;
 }
 
 function saveDb(db: AccountDatabase): void {

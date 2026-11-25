@@ -14,6 +14,7 @@ import {
 } from '../types/studyHub';
 import { INITIAL_STUDY_HUB_STATE, STUDY_HUB_IMAGES } from '../data/studyHubData';
 import { useNotifications } from './NotificationContext';
+import { useAuth } from './AuthContext';
 
 const STORAGE_KEY = 'kampus_studyhub_state_v1';
 
@@ -107,10 +108,13 @@ const StudyHubContext = createContext<StudyHubContextType | undefined>(undefined
 
 export const StudyHubProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { addNotification } = useNotifications();
+  const { user, token } = useAuth();
+  const currentUserId = user?.id || 'guest';
+  const userStorageKey = `kampus_studyhub_state_${currentUserId}`;
 
   const [state, setState] = useState<StudyHubState>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = localStorage.getItem(`kampus_studyhub_state_${user?.id || 'guest'}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && Array.isArray(parsed.subjects) && parsed.subjects.length > 0) {
@@ -130,8 +134,24 @@ export const StudyHubProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [libraryInitialCategory, setLibraryInitialCategory] = useState<MaterialCategory | 'all'>('all');
   const [pendingTestLaunch, setPendingTestLaunch] = useState<LaunchTestConfig | null>(null);
 
+  // Load authenticated user's state from server whenever user logs in or switches
   useEffect(() => {
-    fetch('/api/studyhub/bootstrap')
+    // Also load from user-specific local storage cache first
+    try {
+      const cached = localStorage.getItem(userStorageKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && Array.isArray(parsed.subjects)) {
+          setState((prev) => ({ ...prev, ...parsed }));
+        }
+      }
+    } catch {}
+
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (user?.id) headers['x-user-id'] = user.id;
+
+    fetch('/api/studyhub/bootstrap', { headers })
       .then((res) => (res.ok ? res.json() : null))
       .then((json) => {
         if (json && json.success && json.data) {
@@ -139,31 +159,35 @@ export const StudyHubProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             ...prev,
             ...json.data,
             subjects: json.data.subjects?.length ? json.data.subjects : prev.subjects,
-            notes: json.data.notes?.length ? json.data.notes : prev.notes,
+            notes: Array.isArray(json.data.notes) ? json.data.notes : prev.notes,
             materials: json.data.materials?.length ? json.data.materials : prev.materials,
           }));
         }
       })
       .catch(() => {});
-  }, []);
+  }, [user?.id, token, userStorageKey]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(userStorageKey, JSON.stringify(state));
     } catch {
-      // ignore quota overflow on huge files
+      // ignore quota overflow
     }
 
     const timer = setTimeout(() => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (user?.id) headers['x-user-id'] = user.id;
+
       fetch('/api/studyhub/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(state),
       }).catch(() => {});
     }, 1500);
 
     return () => clearTimeout(timer);
-  }, [state]);
+  }, [state, userStorageKey, token, user?.id]);
 
   const openSubjectChapterTopic = (subjectId: string, chapterId?: string, topicId?: string) => {
     setSelectedSubjectId(subjectId);
@@ -254,6 +278,16 @@ export const StudyHubProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const deleteSubject = (id: string) => {
+    const target = state.subjects.find((s) => s.id === id);
+    if (target && (target.isCommon || !target.isCustom)) {
+      addNotification({
+        title: 'Action Restricted',
+        description: 'Common campus curriculum subjects cannot be deleted by students.',
+        type: 'system',
+        time: 'Just now',
+      });
+      return;
+    }
     setState((prev) => ({
       ...prev,
       subjects: prev.subjects.filter((s) => s.id !== id),

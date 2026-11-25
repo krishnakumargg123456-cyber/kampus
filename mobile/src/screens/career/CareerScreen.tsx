@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,10 @@ import {
   TextInput,
   Image,
   Alert,
+  ActivityIndicator,
+  RefreshControl,
+  Modal,
+  Linking,
 } from 'react-native';
 import {
   Briefcase,
@@ -22,308 +26,539 @@ import {
   Building2,
   ArrowRight,
   Sparkles,
+  Plus,
+  Trash2,
+  ExternalLink,
+  GraduationCap,
 } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../theme/ThemeContext';
+import { useAuth } from '../../context/AuthContext';
 import { Spacing, BorderRadius, Typography, Shadows } from '../../theme/tokens';
+import { careerApi } from '../../services/careerApi';
+import type { CareerOpportunity, JobApplication, ResumeDocument } from '../../../../src/types/career';
 
-export const CareerScreen = () => {
+export const CareerScreen = ({ navigation }: any) => {
+  const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+  const { user, token } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<'internships' | 'jobs' | 'resume' | 'roadmaps'>('internships');
-  const [appliedJobs, setAppliedJobs] = useState<string[]>([]);
-  const [savedJobs, setSavedJobs] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<'internships' | 'jobs' | 'applications' | 'resumes'>('internships');
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const OPPORTUNITIES = [
-    {
-      id: 'job_1',
-      title: 'Software Development Engineering Intern (Summer 2026)',
-      company: 'Google Cloud Platform',
-      logo: 'https://images.unsplash.com/photo-1572021335469-31706a17aaef?w=200&auto=format&fit=crop&q=80',
-      type: 'Internship',
-      location: 'Bengaluru / Hybrid',
-      stipend: '₹1,25,000 / month',
-      deadline: 'Dec 15, 2026',
-      eligibility: 'B.Tech/Dual Degree (CS/IT/ECE) graduating in 2027',
-      skills: ['C++', 'Java', 'Distributed Systems'],
-    },
-    {
-      id: 'job_2',
-      title: 'Machine Learning Research Fellow',
-      company: 'Microsoft Research India',
-      logo: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=200&auto=format&fit=crop&q=80',
-      type: 'Internship',
-      location: 'Bengaluru / On-site',
-      stipend: '₹1,10,000 / month',
-      deadline: 'Dec 20, 2026',
-      eligibility: 'Pre-final or Final Year with strong Linear Algebra background',
-      skills: ['PyTorch', 'Transformers', 'NLP'],
-    },
-    {
-      id: 'job_3',
-      title: 'Associate Product Manager (APM)',
-      company: 'Razorpay Technologies',
-      logo: 'https://images.unsplash.com/photo-1551836022-d5d88e9218df?w=200&auto=format&fit=crop&q=80',
-      type: 'Full-time',
-      location: 'Bengaluru',
-      stipend: '₹22,00,000 CTC',
-      deadline: 'Jan 10, 2027',
-      eligibility: 'All Engineering & Tech Streams (Graduating Batch 2026)',
-      skills: ['Product Analytics', 'System Design', 'User Empathy'],
-    },
-  ];
+  // Backend state
+  const [opportunities, setOpportunities] = useState<CareerOpportunity[]>([]);
+  const [applications, setApplications] = useState<JobApplication[]>([]);
+  const [savedJobIds, setSavedJobIds] = useState<string[]>([]);
+  const [resumes, setResumes] = useState<ResumeDocument[]>([]);
+  const [applyingId, setApplyingId] = useState<string | null>(null);
 
-  const ROADMAPS = [
-    {
-      id: 'rm_1',
-      title: 'Full Stack AI Engineering Roadmap',
-      duration: '16 Weeks',
-      topics: ['Python & FastApi', 'React Native & Expo', 'RAG & Vector DBs', 'LLM Deployment'],
-      enrolled: 1840,
-    },
-    {
-      id: 'rm_2',
-      title: 'High-Frequency Trading & Systems Roadmap',
-      duration: '12 Weeks',
-      topics: ['Modern C++20', 'Linux Kernel Optimization', 'Lock-Free Queues', 'Network Sockets'],
-      enrolled: 920,
-    },
-  ];
+  // New Resume Modal
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [newResumeTitle, setNewResumeTitle] = useState('');
+  const [newResumeSummary, setNewResumeSummary] = useState('');
+  const [newResumeSkills, setNewResumeSkills] = useState('');
+  const [creatingResume, setCreatingResume] = useState(false);
 
-  const handleApply = (id: string, title: string, company: string) => {
-    if (appliedJobs.includes(id)) {
-      Alert.alert('Already Submitted', 'Your application is currently Under Review by the recruiting team.');
+  const loadCareerData = useCallback(async () => {
+    try {
+      const data = await careerApi.getBootstrap(token, user?.userId);
+      setOpportunities(data.opportunities || []);
+      setApplications(data.applications || []);
+      setSavedJobIds(data.savedOpportunityIds || []);
+      setResumes(data.resumes || []);
+    } catch (err: any) {
+      console.warn('[CareerScreen] Load error:', err.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [token, user?.userId]);
+
+  useEffect(() => {
+    loadCareerData();
+  }, [loadCareerData]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadCareerData();
+  };
+
+  const handleApply = async (opp: CareerOpportunity) => {
+    if (opp.applicationMode === 'External Link' && opp.externalApplyUrl) {
+      Linking.openURL(opp.externalApplyUrl);
       return;
     }
-    setAppliedJobs((prev) => [...prev, id]);
-    Alert.alert(
-      'Application Dispatched!',
-      `Successfully applied to ${title} at ${company}. Your verified KAMPUS Student Portfolio has been transmitted.`
-    );
+
+    const alreadyApplied = applications.some((a) => a.opportunityId === opp.id);
+    if (alreadyApplied) {
+      Alert.alert('Already Applied', 'Your application is already on file for this opportunity.');
+      return;
+    }
+
+    setApplyingId(opp.id);
+    try {
+      const newApp = await careerApi.applyToOpportunity(
+        opp.id,
+        opp.title,
+        opp.organizationName,
+        'Applied via KAMPUS Student Portal',
+        token,
+        user?.userId
+      );
+      setApplications((prev) => [newApp, ...prev]);
+      Alert.alert(
+        'Application Submitted! 🎉',
+        `Your verified academic profile has been sent to ${opp.organizationName} for the ${opp.title} role.`
+      );
+    } catch (err: any) {
+      Alert.alert('Application Notice', err.message || 'Could not complete application.');
+    } finally {
+      setApplyingId(null);
+    }
   };
 
-  const toggleSave = (id: string) => {
-    setSavedJobs((prev) =>
-      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
-    );
+  const handleToggleSave = async (oppId: string) => {
+    try {
+      const updated = await careerApi.toggleSavedOpportunity(oppId, token, user?.userId);
+      setSavedJobIds(updated);
+    } catch {
+      setSavedJobIds((prev) =>
+        prev.includes(oppId) ? prev.filter((id) => id !== oppId) : [...prev, oppId]
+      );
+    }
   };
+
+  const handleCreateResume = async () => {
+    if (!newResumeTitle.trim()) {
+      Alert.alert('Required', 'Please enter a title for your resume.');
+      return;
+    }
+    setCreatingResume(true);
+    try {
+      const skillList = newResumeSkills.split(',').map((s) => s.trim()).filter(Boolean);
+      const created = await careerApi.createResume(
+        newResumeTitle.trim(),
+        newResumeSummary.trim(),
+        skillList,
+        token,
+        user?.userId
+      );
+      setResumes((prev) => [created, ...prev]);
+      setShowResumeModal(false);
+      setNewResumeTitle('');
+      setNewResumeSummary('');
+      setNewResumeSkills('');
+      Alert.alert('Success', 'Resume version created successfully.');
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Could not create resume.');
+    } finally {
+      setCreatingResume(false);
+    }
+  };
+
+  const handleDeleteResume = async (resumeId: string) => {
+    Alert.alert('Delete Resume', 'Are you sure you want to remove this resume version?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await careerApi.deleteResume(resumeId, token, user?.userId);
+            setResumes((prev) => prev.filter((r) => r.id !== resumeId));
+          } catch (err: any) {
+            Alert.alert('Error', err.message || 'Could not delete resume.');
+          }
+        },
+      },
+    ]);
+  };
+
+  const filteredOpportunities = opportunities.filter((o) => {
+    const isInternship = o.opportunityType === 'Internship';
+    const matchesTab = activeTab === 'internships' ? isInternship : !isInternship;
+    if (!matchesTab) return false;
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      return (
+        o.title.toLowerCase().includes(q) ||
+        o.organizationName.toLowerCase().includes(q) ||
+        o.requiredSkills.some((s) => s.toLowerCase().includes(q))
+      );
+    }
+    return true;
+  });
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
+    <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: insets.top }}>
       {/* Header */}
       <View style={[styles.header, { backgroundColor: colors.surface, borderBottomColor: colors.borderLight }]}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={[styles.headerTitle, { color: colors.text }]}>Career & Placement</Text>
           <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>
-            Verified Internships, Placement Drives & Career Roadmaps
+            Verified Internships, Placement Drives & Resume Hub
           </Text>
+        </View>
+        <View style={styles.badge}>
+          <Briefcase size={14} color="#3b82f6" />
+          <Text style={styles.badgeText}>Recruiting '26</Text>
         </View>
       </View>
 
       {/* Tabs */}
       <View style={[styles.tabBar, { backgroundColor: colors.surface, borderBottomColor: colors.borderLight }]}>
         <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'internships' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
+          style={[styles.tabItem, activeTab === 'internships' && styles.activeTabItem]}
           onPress={() => setActiveTab('internships')}
         >
-          <Text style={[styles.tabLabel, { color: activeTab === 'internships' ? colors.primary : colors.textMuted }]}>
-            Opportunities
+          <Text style={[styles.tabText, { color: activeTab === 'internships' ? '#3b82f6' : colors.textMuted }]}>
+            Internships ({opportunities.filter((o) => o.opportunityType === 'Internship').length})
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'resume' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
-          onPress={() => setActiveTab('resume')}
+          style={[styles.tabItem, activeTab === 'jobs' && styles.activeTabItem]}
+          onPress={() => setActiveTab('jobs')}
         >
-          <Text style={[styles.tabLabel, { color: activeTab === 'resume' ? colors.primary : colors.textMuted }]}>
-            Resume Builder
+          <Text style={[styles.tabText, { color: activeTab === 'jobs' ? '#3b82f6' : colors.textMuted }]}>
+            Full-Time Jobs ({opportunities.filter((o) => o.opportunityType !== 'Internship').length})
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'roadmaps' && [styles.activeTabItem, { borderBottomColor: colors.primary }]]}
-          onPress={() => setActiveTab('roadmaps')}
+          style={[styles.tabItem, activeTab === 'applications' && styles.activeTabItem]}
+          onPress={() => setActiveTab('applications')}
         >
-          <Text style={[styles.tabLabel, { color: activeTab === 'roadmaps' ? colors.primary : colors.textMuted }]}>
-            Roadmaps
+          <Text style={[styles.tabText, { color: activeTab === 'applications' ? '#3b82f6' : colors.textMuted }]}>
+            Tracker ({applications.length})
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.tabItem, activeTab === 'resumes' && styles.activeTabItem]}
+          onPress={() => setActiveTab('resumes')}
+        >
+          <Text style={[styles.tabText, { color: activeTab === 'resumes' ? '#3b82f6' : colors.textMuted }]}>
+            Resumes ({resumes.length})
           </Text>
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {activeTab === 'internships' && (
-          <View>
-            {/* Search Box */}
-            <View style={[styles.searchBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <Search size={18} color={colors.textMuted} />
-              <TextInput
-                style={[styles.searchInput, { color: colors.text }]}
-                placeholder="Search by role, company, or tech stack..."
-                placeholderTextColor={colors.textMuted}
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-            </View>
+      {/* Search Bar for Listings */}
+      {(activeTab === 'internships' || activeTab === 'jobs') && (
+        <View style={[styles.searchContainer, { backgroundColor: colors.surface }]}>
+          <Search size={16} color={colors.textMuted} />
+          <TextInput
+            style={[styles.searchInput, { color: colors.text }]}
+            placeholder="Search roles, companies, tech stacks..."
+            placeholderTextColor={colors.textMuted}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+        </View>
+      )}
 
-            {/* Opportunities List */}
-            {OPPORTUNITIES.map((job) => {
-              const isApplied = appliedJobs.includes(job.id);
-              const isSaved = savedJobs.includes(job.id);
-              return (
-                <View
-                  key={job.id}
-                  style={[
-                    styles.jobCard,
-                    { backgroundColor: colors.surface, borderColor: colors.border },
-                    Shadows.card,
-                  ]}
-                >
-                  <View style={styles.jobTopRow}>
-                    <Image source={{ uri: job.logo }} style={styles.companyLogo} />
-                    <View style={styles.jobMainInfo}>
-                      <Text style={[styles.jobTitle, { color: colors.text }]}>{job.title}</Text>
-                      <Text style={[styles.companyName, { color: colors.primary }]}>{job.company}</Text>
-                    </View>
-                    <TouchableOpacity onPress={() => toggleSave(job.id)}>
-                      <Bookmark
-                        size={20}
-                        color={isSaved ? colors.primary : colors.textMuted}
-                        fill={isSaved ? colors.primary : 'transparent'}
-                      />
-                    </TouchableOpacity>
-                  </View>
-
-                  <View style={styles.jobDetailsGrid}>
-                    <View style={styles.detailItem}>
-                      <MapPin size={13} color={colors.textMuted} />
-                      <Text style={[styles.detailText, { color: colors.textSecondary }]}>{job.location}</Text>
-                    </View>
-                    <View style={styles.detailItem}>
-                      <DollarSign size={13} color={colors.success} />
-                      <Text style={[styles.detailText, { color: colors.success, fontWeight: '700' }]}>{job.stipend}</Text>
-                    </View>
-                    <View style={styles.detailItem}>
-                      <Clock size={13} color={colors.textMuted} />
-                      <Text style={[styles.detailText, { color: colors.textSecondary }]}>Deadline: {job.deadline}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.skillsRow}>
-                    {job.skills.map((skill, idx) => (
-                      <View key={idx} style={[styles.skillTag, { backgroundColor: colors.surfaceElevated }]}>
-                        <Text style={[styles.skillText, { color: colors.textSecondary }]}>{skill}</Text>
-                      </View>
-                    ))}
-                  </View>
-
-                  <View style={[styles.jobFooter, { borderTopColor: colors.borderLight }]}>
-                    <View style={[styles.typePill, { backgroundColor: colors.primaryLight }]}>
-                      <Text style={[styles.typePillText, { color: colors.primary }]}>{job.type}</Text>
-                    </View>
-                    <TouchableOpacity
-                      style={[
-                        styles.applyBtn,
-                        { backgroundColor: isApplied ? colors.success : colors.primary },
-                      ]}
-                      onPress={() => handleApply(job.id, job.title, job.company)}
-                    >
-                      <Text style={styles.applyBtnText}>
-                        {isApplied ? 'Application Sent ✓' : 'Instant Apply'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {activeTab === 'resume' && (
-          <View>
-            <View style={[styles.resumeCard, { backgroundColor: colors.surface, borderColor: colors.border }, Shadows.card]}>
-              <View style={styles.resumeHeader}>
-                <View style={[styles.resumeIconBadge, { backgroundColor: colors.primaryLight }]}>
-                  <FileText size={24} color={colors.primary} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.resumeTitle, { color: colors.text }]}>ATS-Optimized Student Resume</Text>
-                  <Text style={[styles.resumeSubtitle, { color: colors.textMuted }]}>
-                    Auto-generated from your verified KAMPUS achievements and coursework.
+      {loading ? (
+        <View style={styles.centerContainer}>
+          <ActivityIndicator size="large" color="#3b82f6" />
+          <Text style={[styles.loadingText, { color: colors.textMuted }]}>Loading verified career opportunities...</Text>
+        </View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#3b82f6" />}
+        >
+          {/* Opportunities View */}
+          {(activeTab === 'internships' || activeTab === 'jobs') && (
+            <>
+              {filteredOpportunities.length === 0 ? (
+                <View style={styles.emptyContainer}>
+                  <Building2 size={44} color={colors.textMuted} />
+                  <Text style={[styles.emptyTitle, { color: colors.text }]}>No opportunities found</Text>
+                  <Text style={[styles.emptySub, { color: colors.textMuted }]}>
+                    Try adjusting your search criteria or check back soon for campus placement updates.
                   </Text>
                 </View>
-              </View>
+              ) : (
+                filteredOpportunities.map((opp) => {
+                  const isSaved = savedJobIds.includes(opp.id);
+                  const isApplied = applications.some((a) => a.opportunityId === opp.id);
+                  const isPending = applyingId === opp.id;
 
-              <View style={styles.atsScoreRow}>
-                <Text style={[styles.atsLabel, { color: colors.textSecondary }]}>ATS Compatibility Score:</Text>
-                <Text style={[styles.atsScore, { color: colors.success }]}>94 / 100</Text>
-              </View>
+                  return (
+                    <View
+                      key={opp.id}
+                      style={[
+                        styles.card,
+                        {
+                          backgroundColor: colors.surface,
+                          borderColor: colors.borderLight,
+                        },
+                      ]}
+                    >
+                      <View style={styles.cardHeader}>
+                        <View style={styles.companyRow}>
+                          <View style={styles.avatarPlaceholder}>
+                            <Building2 size={20} color="#3b82f6" />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.roleTitle, { color: colors.text }]}>{opp.title}</Text>
+                            <Text style={[styles.companyText, { color: colors.textMuted }]}>
+                              {opp.organizationName} • {opp.location} ({opp.workFormat})
+                            </Text>
+                          </View>
+                          <TouchableOpacity onPress={() => handleToggleSave(opp.id)}>
+                            <Bookmark
+                              size={22}
+                              color={isSaved ? '#3b82f6' : colors.textMuted}
+                              fill={isSaved ? '#3b82f6' : 'transparent'}
+                            />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
 
+                      {/* Details */}
+                      <View style={styles.detailRow}>
+                        <View style={styles.pill}>
+                          <DollarSign size={13} color="#10b981" />
+                          <Text style={styles.pillText}>{opp.compensationLabel}</Text>
+                        </View>
+                        <View style={styles.pill}>
+                          <Clock size={13} color="#f59e0b" />
+                          <Text style={styles.pillText}>Deadline: {opp.deadlineISO}</Text>
+                        </View>
+                      </View>
+
+                      {/* Skills */}
+                      <View style={styles.skillsRow}>
+                        {opp.requiredSkills.slice(0, 4).map((skill, idx) => (
+                          <View key={idx} style={[styles.skillTag, { backgroundColor: isDark ? '#1e293b' : '#f1f5f9' }]}>
+                            <Text style={[styles.skillText, { color: colors.text }]}>{skill}</Text>
+                          </View>
+                        ))}
+                      </View>
+
+                      {/* Footer Actions */}
+                      <View style={[styles.cardFooter, { borderTopColor: colors.borderLight }]}>
+                        <Text style={[styles.footerEligibility, { color: colors.textMuted }]} numberOfLines={1}>
+                          {opp.educationRequirement}
+                        </Text>
+                        <TouchableOpacity
+                          style={[
+                            styles.applyBtn,
+                            isApplied && styles.appliedBtn,
+                            isPending && { opacity: 0.7 },
+                          ]}
+                          disabled={isApplied || isPending}
+                          onPress={() => handleApply(opp)}
+                        >
+                          {isPending ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <>
+                              <Text style={styles.applyBtnText}>
+                                {isApplied ? 'Applied ✓' : opp.applicationMode === 'External Link' ? 'Apply External ↗' : 'Apply Now'}
+                              </Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {/* Applications Tracker View */}
+          {activeTab === 'applications' && (
+            <>
+              {applications.length === 0 ? (
+                <View style={styles.emptyContainer}>
+                  <CheckCircle2 size={44} color={colors.textMuted} />
+                  <Text style={[styles.emptyTitle, { color: colors.text }]}>No applications yet</Text>
+                  <Text style={[styles.emptySub, { color: colors.textMuted }]}>
+                    When you apply for internships or campus jobs, your real-time review progress will appear here.
+                  </Text>
+                </View>
+              ) : (
+                applications.map((app) => (
+                  <View
+                    key={app.id}
+                    style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}
+                  >
+                    <View style={styles.cardHeader}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.roleTitle, { color: colors.text }]}>{app.roleTitle}</Text>
+                        <Text style={[styles.companyText, { color: colors.textMuted }]}>{app.companyName}</Text>
+                      </View>
+                      <View style={[styles.statusBadge, { backgroundColor: app.status === 'Applied' ? '#eff6ff' : '#f0fdf4' }]}>
+                        <Text style={[styles.statusText, { color: app.status === 'Applied' ? '#2563eb' : '#16a34a' }]}>
+                          {app.status}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.appDate, { color: colors.textMuted }]}>
+                      Applied on: {app.appliedDateISO ? new Date(app.appliedDateISO).toLocaleDateString() : 'Recent'}
+                    </Text>
+                    {Boolean(app.personalNotes) && (
+                      <Text style={[styles.appNotes, { color: colors.textMuted }]}>
+                        Notes: {app.personalNotes}
+                      </Text>
+                    )}
+                  </View>
+                ))
+              )}
+            </>
+          )}
+
+          {/* Resumes View */}
+          {activeTab === 'resumes' && (
+            <>
+              <TouchableOpacity style={styles.createResumeBtn} onPress={() => setShowResumeModal(true)}>
+                <Plus size={18} color="#fff" />
+                <Text style={styles.createResumeBtnText}>Create New Resume Version</Text>
+              </TouchableOpacity>
+
+              {resumes.length === 0 ? (
+                <View style={styles.emptyContainer}>
+                  <FileText size={44} color={colors.textMuted} />
+                  <Text style={[styles.emptyTitle, { color: colors.text }]}>No saved resumes</Text>
+                  <Text style={[styles.emptySub, { color: colors.textMuted }]}>
+                    Build targeted resumes for software, data, or product roles.
+                  </Text>
+                </View>
+              ) : (
+                resumes.map((resume) => (
+                  <View
+                    key={resume.id}
+                    style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}
+                  >
+                    <View style={styles.cardHeader}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.roleTitle, { color: colors.text }]}>
+                          {resume.versionName || (resume as any).title || 'Resume Profile'}
+                        </Text>
+                        <Text style={[styles.companyText, { color: colors.textMuted }]}>
+                          Updated: {resume.updatedAt ? new Date(resume.updatedAt).toLocaleDateString() : 'Recently'}
+                        </Text>
+                      </View>
+                      <TouchableOpacity onPress={() => handleDeleteResume(resume.id)}>
+                        <Trash2 size={18} color="#ef4444" />
+                      </TouchableOpacity>
+                    </View>
+                    {Boolean(resume.summary) && (
+                      <Text style={[styles.resumeSummary, { color: colors.text }]} numberOfLines={2}>
+                        {resume.summary}
+                      </Text>
+                    )}
+                    <View style={styles.skillsRow}>
+                      {(resume.skills || []).slice(0, 5).map((s: string, idx: number) => (
+                        <View key={idx} style={[styles.skillTag, { backgroundColor: isDark ? '#1e293b' : '#f1f5f9' }]}>
+                          <Text style={[styles.skillText, { color: colors.text }]}>{s}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                ))
+              )}
+            </>
+          )}
+        </ScrollView>
+      )}
+
+      {/* Create Resume Modal */}
+      <Modal visible={showResumeModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Create Resume Profile</Text>
+
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.borderLight }]}
+              placeholder="Resume Title (e.g. Frontend React SDE)"
+              placeholderTextColor={colors.textMuted}
+              value={newResumeTitle}
+              onChangeText={setNewResumeTitle}
+            />
+
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.borderLight, height: 80 }]}
+              placeholder="Professional Summary"
+              placeholderTextColor={colors.textMuted}
+              multiline
+              value={newResumeSummary}
+              onChangeText={setNewResumeSummary}
+            />
+
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.borderLight }]}
+              placeholder="Skills (comma-separated, e.g. React, Node, Python)"
+              placeholderTextColor={colors.textMuted}
+              value={newResumeSkills}
+              onChangeText={setNewResumeSkills}
+            />
+
+            <View style={styles.modalActions}>
               <TouchableOpacity
-                style={[styles.downloadResumeBtn, { backgroundColor: colors.primary }]}
-                onPress={() => Alert.alert('Resume Exported', 'Downloaded single-page PDF to your documents folder.')}
+                style={[styles.modalCancelBtn, { borderColor: colors.borderLight }]}
+                onPress={() => setShowResumeModal(false)}
               >
-                <Text style={styles.downloadResumeText}>Export PDF Resume</Text>
+                <Text style={{ color: colors.textMuted, fontWeight: '600' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalSubmitBtn}
+                disabled={creatingResume}
+                onPress={handleCreateResume}
+              >
+                {creatingResume ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={{ color: '#fff', fontWeight: '700' }}>Create Resume</Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
-        )}
-
-        {activeTab === 'roadmaps' && (
-          <View>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Curated Career Roadmaps</Text>
-            </View>
-
-            {ROADMAPS.map((rm) => (
-              <View
-                key={rm.id}
-                style={[
-                  styles.roadmapCard,
-                  { backgroundColor: colors.surface, borderColor: colors.border },
-                  Shadows.card,
-                ]}
-              >
-                <View style={styles.roadmapTop}>
-                  <Text style={[styles.roadmapTitle, { color: colors.text }]}>{rm.title}</Text>
-                  <Text style={[styles.roadmapDuration, { color: colors.primary }]}>{rm.duration}</Text>
-                </View>
-                <View style={styles.modulesGrid}>
-                  {rm.topics.map((t, idx) => (
-                    <View key={idx} style={[styles.topicPill, { backgroundColor: colors.surfaceElevated }]}>
-                      <CheckCircle2 size={12} color={colors.success} />
-                      <Text style={[styles.topicText, { color: colors.textSecondary }]}>{t}</Text>
-                    </View>
-                  ))}
-                </View>
-                <TouchableOpacity
-                  style={[styles.enrollBtn, { backgroundColor: colors.primary }]}
-                  onPress={() => Alert.alert('Roadmap Joined', `Enrolled in "${rm.title}". Daily curriculum unlocked!`)}
-                >
-                  <Text style={styles.enrollBtnText}>Start Roadmap</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-          </View>
-        )}
-      </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   header: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.md,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     borderBottomWidth: 1,
   },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     letterSpacing: -0.4,
   },
   headerSubtitle: {
-    fontSize: 12,
+    fontSize: 11,
     marginTop: 2,
+  },
+  badge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#3b82f6',
   },
   tabBar: {
     flexDirection: 'row',
@@ -337,223 +572,224 @@ const styles = StyleSheet.create({
     borderBottomColor: 'transparent',
   },
   activeTabItem: {
-    borderBottomWidth: 2,
+    borderBottomColor: '#3b82f6',
   },
-  tabLabel: {
-    fontSize: 13,
+  tabText: {
+    fontSize: 11,
     fontWeight: '700',
   },
-  scrollContent: {
-    padding: Spacing.md,
-    paddingBottom: Spacing.xxl,
-  },
-  searchBox: {
+  searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+    margin: 12,
+    paddingHorizontal: 12,
+    height: 40,
+    borderRadius: 10,
     borderWidth: 1,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: Spacing.md,
-    height: 44,
-    marginBottom: Spacing.md,
+    borderColor: 'rgba(100, 116, 139, 0.2)',
+    gap: 8,
   },
   searchInput: {
     flex: 1,
-    fontSize: 14,
-    marginLeft: Spacing.sm,
+    fontSize: 13,
   },
-  jobCard: {
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
+  scrollContent: {
+    padding: 12,
+    gap: 12,
   },
-  jobTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.sm,
-  },
-  companyLogo: {
-    width: 44,
-    height: 44,
-    borderRadius: BorderRadius.md,
-    marginRight: Spacing.sm,
-  },
-  jobMainInfo: {
+  centerContainer: {
     flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
   },
-  jobTitle: {
-    fontSize: 15,
+  loadingText: {
+    fontSize: 13,
+    marginTop: 10,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 48,
+    paddingHorizontal: 24,
+  },
+  emptyTitle: {
+    fontSize: 16,
     fontWeight: '700',
-    lineHeight: 20,
+    marginTop: 12,
   },
-  companyName: {
+  emptySub: {
     fontSize: 12,
-    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 18,
+  },
+  card: {
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 14,
+    gap: 10,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  companyRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  avatarPlaceholder: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: '#eff6ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  roleTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  companyText: {
+    fontSize: 11,
     marginTop: 2,
   },
-  jobDetailsGrid: {
+  detailRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: Spacing.sm,
+    gap: 8,
   },
-  detailItem: {
+  pill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    backgroundColor: 'rgba(100, 116, 139, 0.08)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
-  detailText: {
+  pillText: {
     fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
   },
   skillsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
-    marginBottom: Spacing.sm,
   },
   skillTag: {
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: BorderRadius.sm,
+    borderRadius: 6,
   },
   skillText: {
     fontSize: 10,
     fontWeight: '600',
   },
-  jobFooter: {
+  cardFooter: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     borderTopWidth: 1,
-    paddingTop: Spacing.sm,
+    paddingTop: 10,
+    marginTop: 2,
   },
-  typePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: BorderRadius.sm,
+  footerEligibility: {
+    fontSize: 10,
+    flex: 1,
+    marginRight: 8,
   },
-  typePillText: {
+  applyBtn: {
+    backgroundColor: '#2563eb',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  appliedBtn: {
+    backgroundColor: '#10b981',
+  },
+  applyBtnText: {
+    color: '#fff',
     fontSize: 11,
     fontWeight: '700',
   },
-  applyBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: BorderRadius.sm,
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
-  applyBtnText: {
-    color: '#ffffff',
-    fontSize: 12,
+  statusText: {
+    fontSize: 11,
     fontWeight: '700',
   },
-  resumeCard: {
-    borderRadius: BorderRadius.lg,
-    borderWidth: 1,
-    padding: Spacing.lg,
+  appDate: {
+    fontSize: 10,
   },
-  resumeHeader: {
+  appNotes: {
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  createResumeBtn: {
+    backgroundColor: '#2563eb',
     flexDirection: 'row',
-    gap: Spacing.md,
-    alignItems: 'center',
-    marginBottom: Spacing.md,
-  },
-  resumeIconBadge: {
-    width: 48,
-    height: 48,
-    borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 10,
+    marginBottom: 4,
   },
-  resumeTitle: {
+  createResumeBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  resumeSummary: {
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    borderRadius: 14,
+    padding: 18,
+    gap: 12,
+  },
+  modalTitle: {
     fontSize: 16,
     fontWeight: '800',
   },
-  resumeSubtitle: {
-    fontSize: 12,
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  atsScoreRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: Spacing.sm,
-    marginBottom: Spacing.md,
-  },
-  atsLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  atsScore: {
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  downloadResumeBtn: {
-    height: 44,
-    borderRadius: BorderRadius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  downloadResumeText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  sectionHeader: {
-    marginBottom: Spacing.md,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  roadmapCard: {
-    borderRadius: BorderRadius.md,
+  modalInput: {
     borderWidth: 1,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  roadmapTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: Spacing.sm,
-  },
-  roadmapTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    flex: 1,
-  },
-  roadmapDuration: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  modulesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: Spacing.md,
-  },
-  topicPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: BorderRadius.sm,
-  },
-  topicText: {
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  enrollBtn: {
-    height: 38,
-    borderRadius: BorderRadius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  enrollBtnText: {
-    color: '#ffffff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     fontSize: 13,
-    fontWeight: '700',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 6,
+  },
+  modalCancelBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  modalSubmitBtn: {
+    backgroundColor: '#2563eb',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
 });
