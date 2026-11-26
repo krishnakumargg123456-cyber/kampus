@@ -62,6 +62,7 @@ const StudentToolkitPage = lazy(() => import('./pages/modules/StudentToolkitPage
 const NotificationsPage = lazy(() => import('./pages/modules/NotificationsPage').then((m) => ({ default: m.NotificationsPage })));
 const ProfilePage = lazy(() => import('./pages/modules/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const SettingsPage = lazy(() => import('./pages/modules/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const PublicIdVerificationPage = lazy(() => import('./pages/modules/PublicIdVerificationPage').then((m) => ({ default: m.PublicIdVerificationPage })));
 
 const RouteFallback: React.FC = () => (
   <div className="max-w-5xl mx-auto py-16 px-4 flex flex-col items-center justify-center gap-3 text-slate-500 dark:text-slate-400">
@@ -520,6 +521,8 @@ const AppLayout: React.FC = () => {
                 <Route path="/profile" element={<Navigate to="/account/profile" replace />} />
                 <Route path="/settings" element={<Navigate to="/account/settings" replace />} />
                 <Route path="/notifications" element={<Navigate to="/account/notifications" replace />} />
+                <Route path="/verify/id/:identifier" element={<PublicIdVerificationPage />} />
+                <Route path="/verify/:identifier" element={<PublicIdVerificationPage />} />
 
                 {/* Defensive Route Aliases */}
                 <Route path="/study-hub" element={<Navigate to="/learn/study-hub" replace />} />

@@ -290,6 +290,33 @@ export const KampusAiScreen = () => {
     Alert.alert('Copied', 'AI response text copied to clipboard.');
   };
 
+  const formatSafeDate = (d?: string | null) => {
+    if (!d) return 'Recently';
+    try {
+      const dt = new Date(d);
+      return isNaN(dt.getTime()) ? 'Recently' : dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    } catch {
+      return 'Recently';
+    }
+  };
+
+  const formatSafeDateTime = (d?: string | null) => {
+    if (!d) return 'Recently';
+    try {
+      const dt = new Date(d);
+      return isNaN(dt.getTime())
+        ? 'Recently'
+        : dt.toLocaleDateString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+    } catch {
+      return 'Recently';
+    }
+  };
+
   const getGreeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -471,7 +498,7 @@ export const KampusAiScreen = () => {
             </View>
 
             {/* Recent Conversation History List */}
-            {recentConversations.length > 0 && (
+            {Array.isArray(recentConversations) && recentConversations.length > 0 && (
               <View style={styles.recentSection}>
                 <View style={styles.recentHeaderRow}>
                   <Text style={[styles.sectionTitle, { color: colors.textSecondary, marginBottom: 0 }]}>
@@ -483,7 +510,7 @@ export const KampusAiScreen = () => {
                 </View>
 
                 <View style={[styles.recentCardGroup, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-                  {recentConversations.slice(0, 4).map((c, idx) => (
+                  {(recentConversations || []).slice(0, 4).map((c, idx) => (
                     <TouchableOpacity
                       key={c.id}
                       style={[
@@ -508,7 +535,7 @@ export const KampusAiScreen = () => {
                           {c.title}
                         </Text>
                         <Text style={[styles.recentSub, { color: colors.textMuted }]}>
-                          {new Date(c.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })} • {c.messageCount} messages
+                          {formatSafeDate(c.updatedAt)} • {c.messageCount || 0} messages
                         </Text>
                       </View>
                     </TouchableOpacity>
@@ -786,8 +813,8 @@ export const KampusAiScreen = () => {
 
             {/* Conversations List */}
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
-              {recentConversations
-                .filter((c) => c.title.toLowerCase().includes(historySearchQuery.toLowerCase()))
+              {(Array.isArray(recentConversations) ? recentConversations : [])
+                .filter((c) => (c.title || '').toLowerCase().includes((historySearchQuery || '').toLowerCase()))
                 .map((conv) => (
                   <View
                     key={conv.id}
@@ -810,12 +837,7 @@ export const KampusAiScreen = () => {
                           {conv.title}
                         </Text>
                         <Text style={[styles.historyItemDate, { color: colors.textMuted }]}>
-                          {new Date(conv.updatedAt).toLocaleDateString([], {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
+                          {formatSafeDateTime(conv.updatedAt)}
                         </Text>
                       </View>
                     </TouchableOpacity>

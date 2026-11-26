@@ -26,7 +26,9 @@ export interface KampusIdActivityEntry {
     | 'Verification Requested'
     | 'Verification Reviewed'
     | 'Privacy Updated'
-    | 'PDF Downloaded';
+    | 'PDF Downloaded'
+    | 'ID Suspended'
+    | 'ID Restored';
   detail: string;
   timestamp: string;
 }
@@ -58,6 +60,13 @@ export interface KampusIdentityRecord {
   cardVersion: string;
   issuedAt: string;
   updatedAt: string;
+  semester?: string;
+  yearOfStudy?: string;
+  enrollmentNumber?: string;
+  verificationStatus?: string;
+  statusBadge?: string;
+  validUntil?: string;
+  issueDate?: string;
   verification: VerificationStatusBreakdown;
   privacy: KampusIdPrivacySettings;
   activityHistory: KampusIdActivityEntry[];
@@ -118,4 +127,35 @@ export interface PublicVerifiedIdentityPayload {
   issuedAt?: string;
   expiresAt?: string;
   disclaimer: string;
+}
+
+export type KampusIdRecord = KampusIdentityRecord & {
+  yearOfStudy?: string;
+  semester?: string;
+  enrollmentNumber?: string;
+  statusBadge?: string;
+  validUntil?: string;
+  issueDate?: string;
+  verificationStatus?: string;
+};
+
+export type PublicStudentProfilePayload = PublicVerifiedIdentityPayload & {
+  username?: string;
+  specialization?: string;
+  yearOfStudy?: string;
+  graduationYear?: string;
+  issueDate?: string;
+  validUntil?: string;
+  statusBadge?: string;
+};
+
+export interface RoleInfoResponse {
+  role: string;
+  label: string | null;
+}
+
+export interface VerificationRequestPayload {
+  documentType?: string;
+  evidenceText?: string;
+  studentNote?: string;
 }

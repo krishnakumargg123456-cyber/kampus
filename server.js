@@ -8209,12 +8209,1263 @@ function registerEventsClubsBackend(app) {
 }
 
 // server/kampusIdBackend.ts
+import crypto5 from "crypto";
+import fs4 from "fs";
+import path10 from "path";
+import jwt3 from "jsonwebtoken";
+
+// server/notificationsBackend.ts
 import crypto4 from "crypto";
 import fs3 from "fs";
 import path9 from "path";
-var DB_FILE4 = path9.join(process.cwd(), ".kampus_kampus_id_db.json");
-var EVENTS_DB_FILE = path9.join(process.cwd(), ".kampus_events_clubs_db.json");
-var SKILLSWAP_DB_FILE = path9.join(process.cwd(), ".kampus_skillswap_db.json");
+import jwt2 from "jsonwebtoken";
+import { WebSocket as WebSocket3, WebSocketServer as WebSocketServer3 } from "ws";
+var DB_PATH3 = path9.join(process.cwd(), ".kampus_notifications_db.json");
+var PUBLISHER_ADMIN_PASSKEY = "KAMPUS_PUBLISHER_2026";
+var PLANNER_DB_PATH = path9.join(process.cwd(), ".kampus_planner_db.json");
+var CAREER_DB_PATH = path9.join(process.cwd(), ".kampus_career_db.json");
+var EVENTS_DB_PATH = path9.join(process.cwd(), ".kampus_events_clubs_db.json");
+var COLLEGE_DB_PATH = path9.join(process.cwd(), ".kampus_college_explorer_db.json");
+var LOCKER_DB_PATH = path9.join(process.cwd(), ".kampus_locker_db.json");
+var COMMUNITY_DB_PATH = path9.join(process.cwd(), ".kampus_community_db.json");
+var CHAT_DB_PATH = path9.join(process.cwd(), ".kampus_chat_db.json");
+function createEmptyDb() {
+  return {
+    notifications: [],
+    preferencesByUser: {},
+    pushSubscriptions: [],
+    announcements: [],
+    reminderOverrides: {},
+    roleOverrides: {}
+  };
+}
+var notificationsStorage = new ModuleStorage(
+  "notifications",
+  DB_PATH3,
+  () => createEmptyDb()
+);
+function loadDb4() {
+  return notificationsStorage.get();
+}
+function saveDb4(db) {
+  notificationsStorage.saveSync(db);
+}
+function safeReadJson(filePath) {
+  try {
+    if (!fs3.existsSync(filePath)) return null;
+    return JSON.parse(fs3.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function createDefaultPreferences(userId) {
+  return {
+    userId,
+    modules: {
+      academic: {
+        studyReminders: true,
+        examAlerts: true,
+        assignmentUpdates: true,
+        goalReminders: true
+      },
+      community: {
+        mentions: true,
+        replies: true,
+        comments: true,
+        announcements: true
+      },
+      chat: {
+        directMessages: true,
+        groupMessages: true,
+        messageRequests: true
+      },
+      events: {
+        eventReminders: true,
+        registrationUpdates: true,
+        clubAnnouncements: true
+      },
+      career: {
+        applicationReminders: true,
+        interviewAlerts: true,
+        opportunityUpdates: true
+      },
+      market: {
+        buyerInquiries: true,
+        offers: true,
+        listingUpdates: true
+      },
+      rewards: {
+        pointsUpdates: true,
+        achievementUpdates: true,
+        challengeReminders: true,
+        redemptionUpdates: true
+      },
+      system: {
+        securityAlerts: true,
+        serviceUpdates: true
+      }
+    },
+    channels: {
+      inApp: true,
+      browserPush: false,
+      email: false,
+      sms: false,
+      smsConsent: false
+    },
+    quietHours: {
+      enabled: false,
+      startTime: "22:00",
+      endTime: "07:00",
+      timezone: "Asia/Kolkata"
+    },
+    digest: {
+      enabled: false,
+      frequency: "Daily",
+      categories: ["Academic", "Career", "Events & Clubs"]
+    },
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function ensurePreferences(db, userId) {
+  if (!db.preferencesByUser[userId]) {
+    db.preferencesByUser[userId] = createDefaultPreferences(userId);
+  }
+  db.preferencesByUser[userId].modules.system.securityAlerts = true;
+  return db.preferencesByUser[userId];
+}
+function getChannelCapabilities() {
+  const emailConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER);
+  const smsConfigured = Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN);
+  return {
+    inApp: { configured: true, statusText: "Active \xB7 WebSocket + Sync" },
+    push: { configured: true, statusText: "Browser Push API Ready (Permission Required)" },
+    email: {
+      configured: emailConfigured,
+      statusText: emailConfigured ? "SMTP Provider Configured" : "Unavailable \xB7 Email Provider Not Configured"
+    },
+    sms: {
+      configured: smsConfigured,
+      statusText: smsConfigured ? "SMS Gateway Configured" : "Unavailable \xB7 SMS Provider Not Configured"
+    }
+  };
+}
+function isWithinQuietHours(quietHours) {
+  if (!quietHours.enabled) return false;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: quietHours.timezone || "UTC",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    });
+    const currentHHMM = formatter.format(/* @__PURE__ */ new Date());
+    const start = quietHours.startTime || "22:00";
+    const end = quietHours.endTime || "07:00";
+    if (start === end) return false;
+    if (start < end) {
+      return currentHHMM >= start && currentHHMM < end;
+    }
+    return currentHHMM >= start || currentHHMM < end;
+  } catch {
+    return false;
+  }
+}
+function assignCategoryAndRules(input) {
+  const text = `${input.title} ${input.description}`.toLowerCase();
+  const route = (input.linkRoute || "").toLowerCase();
+  let category = input.category || "System";
+  let sourceModule = input.sourceModule || "";
+  if (!input.category) {
+    if (route.includes("/chat")) {
+      category = "Chat";
+      sourceModule = sourceModule || "KAMPUS Chat";
+    } else if (route.includes("/community")) {
+      category = "Community";
+      sourceModule = sourceModule || "Student Community";
+    } else if (route.includes("/events")) {
+      category = "Events & Clubs";
+      sourceModule = sourceModule || "Events & Clubs";
+    } else if (route.includes("/career")) {
+      category = "Career";
+      sourceModule = sourceModule || "Career";
+    } else if (route.includes("/college-explorer")) {
+      category = "College Explorer";
+      sourceModule = sourceModule || "College Explorer";
+    } else if (route.includes("/market")) {
+      category = "KAMPUS Market";
+      sourceModule = sourceModule || "KAMPUS Market";
+    } else if (route.includes("/digital-locker")) {
+      category = "Digital Locker";
+      sourceModule = sourceModule || "Digital Locker";
+    } else if (route.includes("/rewards")) {
+      category = "KAMPUS Rewards";
+      sourceModule = sourceModule || "KAMPUS Rewards";
+    } else if (route.includes("/planner")) {
+      category = "Academic";
+      sourceModule = sourceModule || "KAMPUS Planner";
+    } else if (route.includes("/study-hub") || route.includes("/notes") || route.includes("/kampus-ai")) {
+      category = "Academic";
+      sourceModule = sourceModule || "Study Hub";
+    } else if (input.legacyType === "career") {
+      category = "Career";
+      sourceModule = sourceModule || "Career";
+    } else if (input.legacyType === "campus") {
+      category = "Events & Clubs";
+      sourceModule = sourceModule || "Campus";
+    } else if (input.legacyType === "academic" || input.subType === "exam_alert" || input.subType === "assignment" || input.subType === "goal") {
+      category = "Academic";
+      sourceModule = sourceModule || "Academic";
+    } else if (input.subType === "club_announcement") {
+      category = "Events & Clubs";
+      sourceModule = sourceModule || "Events & Clubs";
+    } else {
+      category = "System";
+      sourceModule = sourceModule || "System";
+    }
+  } else {
+    sourceModule = sourceModule || category;
+  }
+  const isMention = Boolean(
+    input.subType === "mention" || text.includes("mentioned you") || text.includes("@")
+  );
+  const isReminder = Boolean(
+    input.subType === "reminder" || text.includes("reminder") || text.includes("due ") || text.includes("deadline") || text.includes("snoozed") || text.includes("scheduled")
+  );
+  const subType = input.subType || (text.includes("security") || text.includes("password") || text.includes("login alert") ? "security_alert" : isMention ? "mention" : isReminder ? "reminder" : "general");
+  let priority = input.priority || "Normal";
+  if (!input.priority) {
+    if (subType === "security_alert" || text.includes("exam rescheduled") || text.includes("exam cancelled") || text.includes("immediate examination") || text.includes("critical deadline")) {
+      priority = "Urgent";
+    } else if (text.includes("interview") || text.includes("assignment deadline") || text.includes("due tomorrow") || text.includes("counteroffer") || text.includes("offer received") || text.includes("admission deadline")) {
+      priority = "High";
+    } else if (text.includes("recommendation") || text.includes("digest") || text.includes("tip")) {
+      priority = "Low";
+    } else {
+      priority = "Normal";
+    }
+  }
+  return { category, sourceModule, subType, priority, isMention, isReminder };
+}
+function isCategoryAllowedByPreferences(prefs, category, subType) {
+  if (category === "System" && subType === "security_alert") {
+    return true;
+  }
+  switch (category) {
+    case "Academic":
+      if (subType === "exam_alert") return prefs.modules.academic.examAlerts;
+      if (subType === "assignment") return prefs.modules.academic.assignmentUpdates;
+      if (subType === "goal") return prefs.modules.academic.goalReminders;
+      return prefs.modules.academic.studyReminders || prefs.modules.academic.examAlerts || prefs.modules.academic.assignmentUpdates || prefs.modules.academic.goalReminders;
+    case "Community":
+      if (subType === "mention") return prefs.modules.community.mentions;
+      if (subType === "reply") return prefs.modules.community.replies;
+      if (subType === "comment") return prefs.modules.community.comments;
+      return prefs.modules.community.mentions || prefs.modules.community.replies || prefs.modules.community.comments || prefs.modules.community.announcements;
+    case "Chat":
+      return prefs.modules.chat.directMessages || prefs.modules.chat.groupMessages || prefs.modules.chat.messageRequests;
+    case "Events & Clubs":
+      return prefs.modules.events.eventReminders || prefs.modules.events.registrationUpdates || prefs.modules.events.clubAnnouncements;
+    case "Career":
+      return prefs.modules.career.applicationReminders || prefs.modules.career.interviewAlerts || prefs.modules.career.opportunityUpdates;
+    case "KAMPUS Market":
+      return prefs.modules.market.buyerInquiries || prefs.modules.market.offers || prefs.modules.market.listingUpdates;
+    case "KAMPUS Rewards":
+      return prefs.modules.rewards.pointsUpdates || prefs.modules.rewards.achievementUpdates || prefs.modules.rewards.challengeReminders || prefs.modules.rewards.redemptionUpdates;
+    case "System":
+      return prefs.modules.system.serviceUpdates;
+    default:
+      return true;
+  }
+}
+function buildDeliveryRecords(db, userId, prefs, allowedByPref, suppressedByQuietHours) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const caps = getChannelCapabilities();
+  const records = [];
+  if (!allowedByPref) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "in_app",
+      status: "Skipped (Preference Disabled)",
+      detail: "Category muted in user notification preferences.",
+      timestamp: now
+    });
+  } else if (suppressedByQuietHours) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "in_app",
+      status: "Held (Quiet Hours)",
+      detail: `Held non-critical alert during quiet hours (${prefs.quietHours.startTime}\u2013${prefs.quietHours.endTime} ${prefs.quietHours.timezone}).`,
+      timestamp: now
+    });
+  } else if (!prefs.channels.inApp) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "in_app",
+      status: "Skipped (Preference Disabled)",
+      detail: "In-app feed delivery disabled by user.",
+      timestamp: now
+    });
+  } else {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "in_app",
+      status: "Delivered",
+      detail: "Delivered to centralized Notification Center inbox.",
+      timestamp: now
+    });
+  }
+  const activeSub = db.pushSubscriptions.find((s) => s.userId === userId && s.active && s.permissionState === "granted");
+  if (prefs.channels.browserPush) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "push",
+      status: suppressedByQuietHours ? "Held (Quiet Hours)" : activeSub ? "Delivered" : "Unavailable (Provider Not Configured)",
+      detail: activeSub ? `Dispatched via active browser subscription (${activeSub.platform}).` : "Browser push permission not granted on this device.",
+      timestamp: now
+    });
+  }
+  if (prefs.channels.email) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "email",
+      status: caps.email.configured ? "Delivered" : "Unavailable (Provider Not Configured)",
+      detail: caps.email.statusText,
+      timestamp: now
+    });
+  }
+  if (prefs.channels.sms) {
+    records.push({
+      id: `del_${crypto4.randomUUID().slice(0, 8)}`,
+      channel: "sms",
+      status: caps.sms.configured && prefs.channels.smsConsent ? "Delivered" : "Unavailable (Provider Not Configured)",
+      detail: !caps.sms.configured ? caps.sms.statusText : "SMS consent missing.",
+      timestamp: now
+    });
+  }
+  return records;
+}
+function buildAggregatedReminders(db, userId) {
+  const reminders = [];
+  const todayISO = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const planner = safeReadJson(PLANNER_DB_PATH);
+  for (const t of planner?.tasks || []) {
+    if (t.userId !== userId || t.status === "Cancelled" || t.reminderState === "Dismissed") continue;
+    let status = "Upcoming";
+    if (t.status === "Completed" || t.reminderState === "Completed") status = "Completed";
+    else if (t.reminderState === "Snoozed") status = "Snoozed";
+    else if (t.dueDateISO < todayISO) status = "Missed";
+    reminders.push({
+      id: `rem_planner_task_${t.id}`,
+      sourceModule: "KAMPUS Planner",
+      sourceItemId: t.id,
+      title: t.title,
+      subtitle: `${t.category} Task`,
+      dueDateISO: t.dueDateISO,
+      dueTime: t.dueTime || "18:00",
+      status,
+      snoozedUntilISO: t.snoozedUntilISO || null,
+      linkRoute: "/tools/planner",
+      priority: t.priority || "Normal"
+    });
+  }
+  for (const x of planner?.exams || []) {
+    if (x.userId !== userId) continue;
+    const key = `${userId}::KAMPUS Planner::exam_${x.id}`;
+    const ov = db.reminderOverrides[key];
+    let status = ov?.status || (x.prepStatus === "Ready" ? "Completed" : x.dateISO < todayISO ? "Missed" : "Upcoming");
+    reminders.push({
+      id: `rem_planner_exam_${x.id}`,
+      sourceModule: "KAMPUS Planner",
+      sourceItemId: `exam_${x.id}`,
+      title: x.name,
+      subtitle: `Exam \xB7 ${x.subject}`,
+      dueDateISO: ov?.rescheduledDateISO || x.dateISO,
+      dueTime: ov?.rescheduledTime || x.time || "09:30",
+      status,
+      snoozedUntilISO: ov?.snoozedUntilISO || null,
+      linkRoute: "/tools/planner",
+      priority: "High"
+    });
+  }
+  const career = safeReadJson(CAREER_DB_PATH);
+  for (const appItem of career?.applications || []) {
+    if (appItem.userId !== userId) continue;
+    const key = `${userId}::Career::${appItem.id}`;
+    const ov = db.reminderOverrides[key];
+    const dueDate = ov?.rescheduledDateISO || appItem.interviewDateISO || (appItem.appliedAt || todayISO).slice(0, 10);
+    const status = ov?.status || (appItem.status === "Rejected" || appItem.status === "Offer Accepted" ? "Completed" : "Upcoming");
+    reminders.push({
+      id: `rem_career_${appItem.id}`,
+      sourceModule: "Career",
+      sourceItemId: appItem.id,
+      title: `${appItem.opportunityTitle || "Career Application"} (${appItem.status || "Active"})`,
+      subtitle: appItem.companyName || "Career Opportunity",
+      dueDateISO: dueDate,
+      dueTime: ov?.rescheduledTime || "10:00",
+      status,
+      snoozedUntilISO: ov?.snoozedUntilISO || null,
+      linkRoute: "/career",
+      priority: appItem.status === "Interview Scheduled" ? "High" : "Normal"
+    });
+  }
+  const eventsDb = safeReadJson(EVENTS_DB_PATH);
+  for (const reg of eventsDb?.registrations || []) {
+    if (reg.userId !== userId || reg.status === "Cancelled") continue;
+    const ev = (eventsDb?.events || []).find((e) => e.id === reg.eventId);
+    if (!ev) continue;
+    const key = `${userId}::Events & Clubs::${reg.id}`;
+    const ov = db.reminderOverrides[key];
+    const dueDate = ov?.rescheduledDateISO || ev.dateISO || todayISO;
+    const status = ov?.status || (dueDate < todayISO ? "Completed" : "Upcoming");
+    reminders.push({
+      id: `rem_event_${reg.id}`,
+      sourceModule: "Events & Clubs",
+      sourceItemId: reg.id,
+      title: ev.title,
+      subtitle: "Registered Campus Event",
+      dueDateISO: dueDate,
+      dueTime: ov?.rescheduledTime || ev.timeLabel || "16:00",
+      status,
+      snoozedUntilISO: ov?.snoozedUntilISO || null,
+      linkRoute: "/campus/events-clubs",
+      priority: "Normal"
+    });
+  }
+  const collegeDb = safeReadJson(COLLEGE_DB_PATH);
+  for (const cr of collegeDb?.reminders || []) {
+    if (cr.userId !== userId) continue;
+    const key = `${userId}::College Explorer::${cr.id}`;
+    const ov = db.reminderOverrides[key];
+    const dueDate = ov?.rescheduledDateISO || cr.deadlineISO || todayISO;
+    const status = ov?.status || (cr.completed ? "Completed" : dueDate < todayISO ? "Missed" : "Upcoming");
+    reminders.push({
+      id: `rem_college_${cr.id}`,
+      sourceModule: "College Explorer",
+      sourceItemId: cr.id,
+      title: cr.title,
+      subtitle: cr.collegeName,
+      dueDateISO: dueDate,
+      dueTime: ov?.rescheduledTime || "17:00",
+      status,
+      snoozedUntilISO: ov?.snoozedUntilISO || null,
+      linkRoute: "/campus/college-explorer",
+      priority: "High"
+    });
+  }
+  const lockerDb = safeReadJson(LOCKER_DB_PATH);
+  for (const doc of lockerDb?.documents || []) {
+    if (doc.ownerId !== userId || !doc.expiryDate) continue;
+    const key = `${userId}::Digital Locker::${doc.id}`;
+    const ov = db.reminderOverrides[key];
+    const dueDate = ov?.rescheduledDateISO || doc.expiryDate;
+    const status = ov?.status || (dueDate < todayISO ? "Missed" : "Upcoming");
+    reminders.push({
+      id: `rem_locker_${doc.id}`,
+      sourceModule: "Digital Locker",
+      sourceItemId: doc.id,
+      title: `Document Renewal: ${doc.title}`,
+      subtitle: doc.category,
+      dueDateISO: dueDate,
+      dueTime: ov?.rescheduledTime || "12:00",
+      status,
+      snoozedUntilISO: ov?.snoozedUntilISO || null,
+      linkRoute: "/tools/digital-locker",
+      priority: "High"
+    });
+  }
+  return reminders.sort((a, b) => `${a.dueDateISO} ${a.dueTime}`.localeCompare(`${b.dueDateISO} ${b.dueTime}`));
+}
+function buildSocialActivity(db, userId) {
+  const items = [];
+  for (const n of db.notifications) {
+    if (n.userId === userId && !n.deleted && (n.category === "Community" || n.category === "Chat" || n.isMention)) {
+      items.push({
+        id: `soc_notif_${n.id}`,
+        kind: n.isMention ? "mention" : n.category === "Chat" ? "chat" : "reply",
+        actorName: n.sourceModule,
+        title: n.title,
+        excerpt: n.description,
+        sourceModule: n.category === "Chat" ? "KAMPUS Chat" : "Student Community",
+        linkRoute: n.linkRoute || (n.category === "Chat" ? "/connect/chat" : "/connect/community"),
+        timestamp: n.createdAt
+      });
+    }
+  }
+  const chatDb = safeReadJson(CHAT_DB_PATH);
+  for (const reqItem of chatDb?.requests || []) {
+    if (reqItem.toUserId === userId && reqItem.status === "pending") {
+      items.push({
+        id: `soc_chatreq_${reqItem.id}`,
+        kind: "chat",
+        actorName: reqItem.fromName,
+        title: `Message request from ${reqItem.fromName}`,
+        excerpt: reqItem.preview || "Sent you a direct message request.",
+        sourceModule: "KAMPUS Chat",
+        linkRoute: "/connect/chat",
+        timestamp: reqItem.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+  }
+  const commDb = safeReadJson(COMMUNITY_DB_PATH);
+  for (const post of commDb?.posts || []) {
+    if (post.authorId === userId && Array.isArray(post.replies)) {
+      for (const rep of post.replies.slice(0, 5)) {
+        items.push({
+          id: `soc_comm_${rep.id}`,
+          kind: rep.accepted ? "accepted_answer" : "reply",
+          actorName: rep.authorName || "Student",
+          title: `${rep.authorName || "A peer"} replied on "${post.title}"`,
+          excerpt: rep.content,
+          sourceModule: "Student Community",
+          linkRoute: "/connect/community",
+          timestamp: rep.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+    }
+  }
+  return items.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 50);
+}
+function isUserEligibleForAnnouncement(ann, userCollege, userCourse) {
+  if (ann.targetAudience === "All Students") return true;
+  const val = (ann.targetValue || "").trim().toLowerCase();
+  if (!val) return true;
+  if (ann.targetAudience === "Selected Colleges") {
+    return (userCollege || "").toLowerCase().includes(val);
+  }
+  if (ann.targetAudience === "Selected Courses") {
+    return (userCourse || "").toLowerCase().includes(val);
+  }
+  return true;
+}
+function registerNotificationsBackend(app) {
+  const db = loadDb4();
+  const wss = new WebSocketServer3({ noServer: true });
+  const socketsByUser = /* @__PURE__ */ new Map();
+  wss.on("connection", (ws, req) => {
+    const url = new URL(req.url || "/", "http://localhost");
+    const userId = url.searchParams.get("userId") || "anonymous";
+    if (!socketsByUser.has(userId)) {
+      socketsByUser.set(userId, /* @__PURE__ */ new Set());
+    }
+    socketsByUser.get(userId).add(ws);
+    ws.send(JSON.stringify({ type: "connected", userId, timestamp: (/* @__PURE__ */ new Date()).toISOString() }));
+    ws.on("close", () => {
+      const set = socketsByUser.get(userId);
+      if (set) {
+        set.delete(ws);
+        if (set.size === 0) socketsByUser.delete(userId);
+      }
+    });
+  });
+  const emitToUser = (userId, payload) => {
+    const sockets = socketsByUser.get(userId);
+    if (!sockets) return;
+    const msg = JSON.stringify(payload);
+    for (const sock of sockets) {
+      if (sock.readyState === WebSocket3.OPEN) {
+        sock.send(msg);
+      }
+    }
+  };
+  const promoteScheduledAnnouncements = () => {
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    let changed = false;
+    for (const ann of db.announcements) {
+      if (ann.status === "Scheduled" && ann.scheduledFor && ann.scheduledFor <= nowIso) {
+        ann.status = "Published";
+        ann.updatedAt = nowIso;
+        changed = true;
+      }
+    }
+    if (changed) saveDb4(db);
+  };
+  app.post("/api/notifications/bootstrap", (req, res) => {
+    const { userId, college, course } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid) return res.status(400).json({ message: "userId is required." });
+    promoteScheduledAnnouncements();
+    const prefs = ensurePreferences(db, uid);
+    saveDb4(db);
+    const userNotifications = db.notifications.filter((n) => n.userId === uid).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const active = userNotifications.filter((n) => !n.deleted && !n.archived);
+    const roleInfo = db.roleOverrides[uid] || { role: "Student", label: null };
+    const isAdmin = roleInfo.role === "Publisher Admin";
+    const announcements = isAdmin ? db.announcements : db.announcements.filter(
+      (a) => a.status === "Published" && isUserEligibleForAnnouncement(a, college, course)
+    );
+    return res.json({
+      notifications: userNotifications,
+      unreadCount: active.filter((n) => !n.read).length,
+      preferences: prefs,
+      channelCapabilities: getChannelCapabilities(),
+      pushSubscriptions: db.pushSubscriptions.filter((s) => s.userId === uid),
+      reminders: buildAggregatedReminders(db, uid),
+      announcements: [...announcements].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      socialActivity: buildSocialActivity(db, uid),
+      roleInfo
+    });
+  });
+  app.post("/api/notifications", (req, res) => {
+    const b = req.body || {};
+    const userId = String(b.userId || "").trim();
+    const title = String(b.title || "").trim();
+    const description = String(b.description || "").trim();
+    if (!userId || !title) {
+      return res.status(400).json({ message: "userId and title are required." });
+    }
+    const prefs = ensurePreferences(db, userId);
+    const idemKey = b.idempotencyKey ? String(b.idempotencyKey).trim() : void 0;
+    if (idemKey) {
+      const existing = db.notifications.find((n) => n.userId === userId && n.idempotencyKey === idemKey);
+      if (existing) {
+        return res.status(200).json({ notification: existing, deduplicated: true });
+      }
+    } else {
+      const recentCutoff = Date.now() - 45e3;
+      const dup = db.notifications.find(
+        (n) => n.userId === userId && !n.deleted && n.title === title && n.description === description && new Date(n.createdAt).getTime() >= recentCutoff
+      );
+      if (dup) {
+        return res.status(200).json({ notification: dup, deduplicated: true });
+      }
+    }
+    const rules = assignCategoryAndRules({
+      title,
+      description,
+      legacyType: b.type,
+      category: b.category,
+      linkRoute: b.linkRoute,
+      sourceModule: b.sourceModule,
+      subType: b.subType,
+      priority: b.priority
+    });
+    const allowed = isCategoryAllowedByPreferences(prefs, rules.category, rules.subType);
+    const quietActive = isWithinQuietHours(prefs.quietHours);
+    const isCriticalSecurity = rules.category === "System" && rules.subType === "security_alert";
+    const suppressedByQuietHours = quietActive && !isCriticalSecurity && rules.priority !== "Urgent";
+    const deliveryRecords = buildDeliveryRecords(db, userId, prefs, allowed, suppressedByQuietHours);
+    if (!allowed) {
+      return res.status(200).json({
+        notification: null,
+        suppressedByPreference: true,
+        deliveryRecords
+      });
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const record = {
+      id: `notif_${crypto4.randomUUID().slice(0, 10)}`,
+      userId,
+      title,
+      description,
+      details: b.details ? String(b.details) : void 0,
+      category: rules.category,
+      subType: rules.subType,
+      sourceModule: rules.sourceModule,
+      priority: rules.priority,
+      read: false,
+      archived: false,
+      deleted: false,
+      deletedAt: null,
+      important: Boolean(b.important) || rules.priority === "Urgent",
+      isMention: Boolean(b.isMention ?? rules.isMention),
+      isReminder: Boolean(b.isReminder ?? rules.isReminder),
+      linkRoute: b.linkRoute ? String(b.linkRoute) : void 0,
+      actionLabel: b.actionLabel ? String(b.actionLabel) : "Open Page",
+      idempotencyKey: idemKey,
+      suppressedByQuietHours,
+      deliveryRecords,
+      createdAt: now,
+      updatedAt: now
+    };
+    db.notifications.unshift(record);
+    let countForUser = 0;
+    db.notifications = db.notifications.filter((n) => {
+      if (n.userId !== userId) return true;
+      countForUser += 1;
+      return countForUser <= 400;
+    });
+    saveDb4(db);
+    emitToUser(userId, { type: "notification:created", notification: record });
+    return res.status(201).json({ notification: record });
+  });
+  app.patch("/api/notifications/:id", (req, res, next) => {
+    const { id } = req.params;
+    if (id === "read-all") return next();
+    const { userId, read, archived, important, deleted } = req.body || {};
+    const uid = String(userId || "").trim();
+    const item = db.notifications.find((n) => n.id === id);
+    if (!item) return res.status(404).json({ message: "Notification not found." });
+    if (item.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
+    if (typeof read === "boolean") item.read = read;
+    if (typeof archived === "boolean") item.archived = archived;
+    if (typeof important === "boolean") item.important = important;
+    if (typeof deleted === "boolean") {
+      item.deleted = deleted;
+      item.deletedAt = deleted ? (/* @__PURE__ */ new Date()).toISOString() : null;
+    }
+    item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    saveDb4(db);
+    emitToUser(uid, { type: "notification:updated", notification: item });
+    return res.json({ notification: item });
+  });
+  app.post("/api/notifications/bulk", (req, res) => {
+    const { userId, action, ids, confirmed } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid || !action) return res.status(400).json({ message: "userId and action are required." });
+    if ((action === "delete" || action === "clear-read") && confirmed !== true) {
+      return res.status(400).json({ message: "Confirmation is required before destructive bulk actions." });
+    }
+    const idSet = new Set(Array.isArray(ids) ? ids.map(String) : []);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let affected = 0;
+    for (const n of db.notifications) {
+      if (n.userId !== uid || n.deleted) continue;
+      if (action === "mark-all-read") {
+        if (!n.read) {
+          n.read = true;
+          n.updatedAt = now;
+          affected += 1;
+        }
+      } else if (action === "clear-read") {
+        if (n.read && !n.archived) {
+          n.deleted = true;
+          n.deletedAt = now;
+          n.updatedAt = now;
+          affected += 1;
+        }
+      } else if (idSet.has(n.id)) {
+        if (action === "mark-read") n.read = true;
+        else if (action === "mark-unread") n.read = false;
+        else if (action === "archive") n.archived = true;
+        else if (action === "unarchive") n.archived = false;
+        else if (action === "delete") {
+          n.deleted = true;
+          n.deletedAt = now;
+        }
+        n.updatedAt = now;
+        affected += 1;
+      }
+    }
+    saveDb4(db);
+    emitToUser(uid, { type: "notification:bulk", action, affected });
+    return res.json({ affected, notifications: db.notifications.filter((n) => n.userId === uid) });
+  });
+  app.put("/api/notifications/preferences", (req, res) => {
+    const { userId, preferences } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid || !preferences) {
+      return res.status(400).json({ message: "userId and preferences are required." });
+    }
+    const current = ensurePreferences(db, uid);
+    const next = {
+      ...current,
+      ...preferences,
+      userId: uid,
+      modules: {
+        ...current.modules,
+        ...preferences.modules || {},
+        system: {
+          ...current.modules.system,
+          ...preferences.modules?.system || {},
+          securityAlerts: true
+          // Strictly enforced mandatory policy
+        }
+      },
+      channels: {
+        ...current.channels,
+        ...preferences.channels || {}
+      },
+      quietHours: {
+        ...current.quietHours,
+        ...preferences.quietHours || {}
+      },
+      digest: {
+        ...current.digest,
+        ...preferences.digest || {}
+      },
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    db.preferencesByUser[uid] = next;
+    saveDb4(db);
+    return res.json({ preferences: next, channelCapabilities: getChannelCapabilities() });
+  });
+  app.post("/api/notifications/push-subscription", (req, res) => {
+    const { userId, permissionState, platform, active } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid) return res.status(400).json({ message: "userId is required." });
+    const existing = db.pushSubscriptions.find((s) => s.userId === uid);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (existing) {
+      existing.permissionState = permissionState || existing.permissionState;
+      existing.platform = platform || existing.platform;
+      existing.active = typeof active === "boolean" ? active : existing.active;
+      existing.updatedAt = now;
+    } else {
+      db.pushSubscriptions.push({
+        id: `push_${crypto4.randomUUID().slice(0, 8)}`,
+        userId: uid,
+        endpointLabel: "Web Browser Notification API",
+        permissionState: permissionState || "default",
+        platform: platform || "Web Browser",
+        active: Boolean(active),
+        updatedAt: now
+      });
+    }
+    const prefs = ensurePreferences(db, uid);
+    if (permissionState === "granted" && active) {
+      prefs.channels.browserPush = true;
+    } else if (active === false) {
+      prefs.channels.browserPush = false;
+    }
+    saveDb4(db);
+    return res.json({
+      pushSubscriptions: db.pushSubscriptions.filter((s) => s.userId === uid),
+      preferences: prefs
+    });
+  });
+  app.get("/api/notifications/reminders", (req, res) => {
+    const uid = String(req.query.userId || "").trim();
+    if (!uid) return res.status(400).json({ message: "userId is required." });
+    return res.json({ reminders: buildAggregatedReminders(db, uid) });
+  });
+  app.post("/api/notifications/reminders/action", (req, res) => {
+    const { userId, sourceModule, sourceItemId, action, dateISO, time } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid || !sourceModule || !sourceItemId || !action) {
+      return res.status(400).json({ message: "userId, sourceModule, sourceItemId, and action are required." });
+    }
+    if (sourceModule === "KAMPUS Planner" && !String(sourceItemId).startsWith("exam_")) {
+      const planner = safeReadJson(PLANNER_DB_PATH);
+      if (planner && Array.isArray(planner.tasks)) {
+        const task = planner.tasks.find((t) => t.id === sourceItemId && t.userId === uid);
+        if (task) {
+          if (action === "complete") {
+            task.status = "Completed";
+            task.reminderState = "Completed";
+            task.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+          } else if (action === "snooze") {
+            const nextDay = dateISO || new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+            task.reminderState = "Snoozed";
+            task.snoozedUntilISO = nextDay;
+            task.dueDateISO = nextDay;
+          } else if (action === "reschedule" && dateISO) {
+            task.dueDateISO = dateISO;
+            if (time) task.dueTime = time;
+            task.reminderState = "Active";
+          }
+          task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          fs3.writeFileSync(PLANNER_DB_PATH, JSON.stringify(planner, null, 2), "utf8");
+        }
+      }
+    } else {
+      const key = `${uid}::${sourceModule}::${sourceItemId}`;
+      const existing = db.reminderOverrides[key] || { updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      if (action === "complete") {
+        existing.status = "Completed";
+      } else if (action === "snooze") {
+        existing.status = "Snoozed";
+        existing.snoozedUntilISO = dateISO || new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+      } else if (action === "reschedule" && dateISO) {
+        existing.status = "Upcoming";
+        existing.rescheduledDateISO = dateISO;
+        if (time) existing.rescheduledTime = time;
+      }
+      existing.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      db.reminderOverrides[key] = existing;
+      saveDb4(db);
+    }
+    return res.json({ reminders: buildAggregatedReminders(db, uid) });
+  });
+  app.post("/api/notifications/auth/role-session", (req, res) => {
+    const { userId, passkey, revert } = req.body || {};
+    const uid = String(userId || "").trim();
+    if (!uid) return res.status(400).json({ message: "userId is required." });
+    if (revert) {
+      delete db.roleOverrides[uid];
+      saveDb4(db);
+      return res.json({ roleInfo: { role: "Student", label: null } });
+    }
+    if (passkey !== PUBLISHER_ADMIN_PASSKEY) {
+      return res.status(403).json({ message: "Invalid official publisher passkey." });
+    }
+    db.roleOverrides[uid] = {
+      role: "Publisher Admin",
+      label: "Authorized Campus Publisher"
+    };
+    saveDb4(db);
+    return res.json({ roleInfo: db.roleOverrides[uid] });
+  });
+  app.post("/api/notifications/announcements", (req, res) => {
+    const b = req.body || {};
+    const uid = String(b.userId || "").trim();
+    const roleInfo = db.roleOverrides[uid];
+    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
+      return res.status(403).json({ message: "Only authorized publishers can create official announcements." });
+    }
+    const title = String(b.title || "").trim();
+    const description = String(b.description || "").trim();
+    if (!title || !description) {
+      return res.status(400).json({ message: "Title and description are required." });
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const scheduledFor = b.scheduledFor ? String(b.scheduledFor) : null;
+    const status = b.status === "Draft" ? "Draft" : scheduledFor && scheduledFor > now ? "Scheduled" : "Published";
+    const ann = {
+      id: `ann_${crypto4.randomUUID().slice(0, 10)}`,
+      title,
+      description,
+      publisherName: String(b.publisherName || "KAMPUS Administration"),
+      publisherRole: String(b.publisherRole || "Official Publisher"),
+      isOfficial: true,
+      category: b.category || "KAMPUS",
+      targetAudience: b.targetAudience || "All Students",
+      targetValue: b.targetValue ? String(b.targetValue) : void 0,
+      attachmentName: b.attachmentName ? String(b.attachmentName) : void 0,
+      linkRoute: b.linkRoute ? String(b.linkRoute) : "/account/notifications",
+      scheduledFor,
+      status,
+      createdAt: now,
+      updatedAt: now,
+      readByUserIds: [],
+      clickedByUserIds: []
+    };
+    db.announcements.unshift(ann);
+    saveDb4(db);
+    if (ann.status === "Published") {
+      for (const [targetUid, sockets] of socketsByUser.entries()) {
+        for (const sock of sockets) {
+          if (sock.readyState === WebSocket3.OPEN) {
+            sock.send(JSON.stringify({ type: "announcement:published", announcement: ann, userId: targetUid }));
+          }
+        }
+      }
+    }
+    return res.status(201).json({ announcement: ann });
+  });
+  app.patch("/api/notifications/announcements/:id", (req, res) => {
+    const { id } = req.params;
+    const b = req.body || {};
+    const uid = String(b.userId || "").trim();
+    const roleInfo = db.roleOverrides[uid];
+    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
+      return res.status(403).json({ message: "Only authorized publishers can edit official announcements." });
+    }
+    const ann = db.announcements.find((a) => a.id === id);
+    if (!ann) return res.status(404).json({ message: "Announcement not found." });
+    if (b.title !== void 0) ann.title = String(b.title);
+    if (b.description !== void 0) ann.description = String(b.description);
+    if (b.category !== void 0) ann.category = b.category;
+    if (b.targetAudience !== void 0) ann.targetAudience = b.targetAudience;
+    if (b.targetValue !== void 0) ann.targetValue = b.targetValue;
+    if (b.status !== void 0) ann.status = b.status;
+    if (b.scheduledFor !== void 0) ann.scheduledFor = b.scheduledFor;
+    ann.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    saveDb4(db);
+    return res.json({ announcement: ann });
+  });
+  app.delete("/api/notifications/announcements/:id", (req, res) => {
+    const { id } = req.params;
+    const uid = String(req.query.userId || "").trim();
+    const roleInfo = db.roleOverrides[uid];
+    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
+      return res.status(403).json({ message: "Only authorized publishers can delete official announcements." });
+    }
+    const idx = db.announcements.findIndex((a) => a.id === id);
+    if (idx === -1) return res.status(404).json({ message: "Announcement not found." });
+    db.announcements.splice(idx, 1);
+    saveDb4(db);
+    return res.json({ deleted: true });
+  });
+  app.post("/api/notifications/announcements/:id/engage", (req, res) => {
+    const { id } = req.params;
+    const { userId, kind } = req.body || {};
+    const uid = String(userId || "").trim();
+    const ann = db.announcements.find((a) => a.id === id);
+    if (!ann || !uid) return res.status(404).json({ message: "Announcement not found." });
+    if (kind === "click") {
+      if (!ann.clickedByUserIds.includes(uid)) ann.clickedByUserIds.push(uid);
+      if (!ann.readByUserIds.includes(uid)) ann.readByUserIds.push(uid);
+    } else {
+      if (!ann.readByUserIds.includes(uid)) ann.readByUserIds.push(uid);
+    }
+    saveDb4(db);
+    return res.json({ announcement: ann });
+  });
+  const getUid = (req) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      try {
+        const decoded = jwt2.decode(token);
+        if (decoded && (decoded.sub || decoded.userId)) {
+          return decoded.sub || decoded.userId;
+        }
+      } catch {
+      }
+    }
+    const headerUserId = req.headers["x-user-id"] || req.headers["x-clerk-user-id"];
+    if (headerUserId && typeof headerUserId === "string" && headerUserId.trim().length > 0) {
+      return headerUserId.trim();
+    }
+    const queryUid = req.query.userId || req.body?.userId;
+    if (queryUid && typeof queryUid === "string" && queryUid.trim().length > 0) {
+      return queryUid.trim();
+    }
+    return "student_default";
+  };
+  const seedDefaultNotificationsForUser = (uid) => {
+    const existing = db.notifications.filter((n) => n.userId === uid && !n.deleted);
+    if (existing.length > 0) return;
+    const now = Date.now();
+    const sampleNotifications = [
+      {
+        title: "End-Sem Examination Schedule Published",
+        description: "Dean of Academic Affairs has released the official timetable & hall seating distribution.",
+        details: "All students are requested to verify their course registration slips and report any slot clashes to exam@kampus.edu by Friday.",
+        category: "Academic",
+        priority: "Important",
+        linkRoute: "StudyHub",
+        actionLabel: "View Schedule",
+        timeOffsetMs: 15 * 60 * 1e3
+      },
+      {
+        title: "Flagship Hackathon 2026: CodeWave Registration",
+        description: "Annual hackathon is now live! \u20B92,50,000 prize pool, cloud credits & mentorship from Google DSC.",
+        details: "Team formation open up to 4 members. Early bird registration ends Sunday at midnight.",
+        category: "Campus",
+        priority: "Urgent",
+        linkRoute: "CampusLife",
+        actionLabel: "Register Now",
+        timeOffsetMs: 2 * 3600 * 1e3
+      },
+      {
+        title: "New Study Group Active: CS Algorithms & LeetCode",
+        description: "Rohan Verma shared detailed solutions for Dynamic Programming on Trees.",
+        category: "Community",
+        priority: "Normal",
+        linkRoute: "Community",
+        actionLabel: "Join Discussion",
+        timeOffsetMs: 5 * 3600 * 1e3
+      },
+      {
+        title: "Order Confirmed: Casio fx-991EX Scientific Calculator",
+        description: "Seller Kavita Joshi accepted your order. Meetup scheduled at Central Library foyer.",
+        category: "Market",
+        priority: "Important",
+        linkRoute: "Market",
+        actionLabel: "Track Order",
+        timeOffsetMs: 24 * 3600 * 1e3
+      },
+      {
+        title: "Welcome to KAMPUS Digital Identity",
+        description: "Complete your student profile to unlock verified digital student ID card & campus perks.",
+        category: "System",
+        priority: "Low",
+        linkRoute: "Profile",
+        actionLabel: "Edit Profile",
+        timeOffsetMs: 48 * 3600 * 1e3
+      },
+      {
+        title: "Pre-Placement Talk: Google Cloud & Microsoft",
+        description: "Career Services invites 3rd and 4th year scholars for interactive roadmap session tomorrow at 4 PM.",
+        category: "Career",
+        priority: "Important",
+        linkRoute: "Career",
+        actionLabel: "View Details",
+        timeOffsetMs: 72 * 3600 * 1e3
+      }
+    ];
+    for (const s of sampleNotifications) {
+      const createdAt = new Date(now - s.timeOffsetMs).toISOString();
+      db.notifications.push({
+        id: `notif_${crypto4.randomUUID().slice(0, 10)}`,
+        userId: uid,
+        title: s.title,
+        description: s.description,
+        details: s.details,
+        category: s.category,
+        subType: "announcement",
+        sourceModule: "system",
+        priority: s.priority,
+        read: s.timeOffsetMs > 24 * 3600 * 1e3,
+        archived: false,
+        deleted: false,
+        deletedAt: null,
+        important: s.priority === "Urgent" || s.priority === "Important",
+        isMention: false,
+        isReminder: false,
+        linkRoute: s.linkRoute,
+        actionLabel: s.actionLabel || "Open",
+        suppressedByQuietHours: false,
+        deliveryRecords: [],
+        createdAt,
+        updatedAt: createdAt
+      });
+    }
+    saveDb4(db);
+  };
+  app.get("/api/notifications", (req, res) => {
+    const uid = getUid(req);
+    promoteScheduledAnnouncements();
+    ensurePreferences(db, uid);
+    seedDefaultNotificationsForUser(uid);
+    const category = req.query.category ? String(req.query.category).trim() : null;
+    const unreadOnly = req.query.unreadOnly === "true" || req.query.unread === "true";
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    let list = db.notifications.filter((n) => n.userId === uid && !n.deleted && !n.archived).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const totalUnread = list.filter((n) => !n.read).length;
+    if (category && category !== "All") {
+      list = list.filter((n) => n.category.toLowerCase() === category.toLowerCase());
+    }
+    if (unreadOnly) {
+      list = list.filter((n) => !n.read);
+    }
+    const total = list.length;
+    const paginated = list.slice((page - 1) * limit, page * limit);
+    return res.json({
+      notifications: paginated,
+      unreadCount: totalUnread,
+      total,
+      page,
+      limit,
+      preferences: db.preferencesByUser[uid] || null
+    });
+  });
+  app.get("/api/notifications/unread-count", (req, res) => {
+    const uid = getUid(req);
+    seedDefaultNotificationsForUser(uid);
+    const unread = db.notifications.filter(
+      (n) => n.userId === uid && !n.read && !n.deleted && !n.archived
+    ).length;
+    return res.json({ unreadCount: unread, count: unread });
+  });
+  app.patch("/api/notifications/:id/read", (req, res) => {
+    const { id } = req.params;
+    const uid = getUid(req);
+    const notif = db.notifications.find((n) => n.id === id);
+    if (!notif) return res.status(404).json({ message: "Notification not found." });
+    if (notif.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
+    notif.read = true;
+    notif.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    saveDb4(db);
+    emitToUser(uid, { type: "notification:updated", notification: notif });
+    return res.json({ success: true, notification: notif });
+  });
+  app.patch("/api/notifications/read-all", (req, res) => {
+    const uid = getUid(req);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let updatedCount = 0;
+    for (const n of db.notifications) {
+      if (n.userId === uid && !n.read && !n.deleted) {
+        n.read = true;
+        n.updatedAt = now;
+        updatedCount += 1;
+      }
+    }
+    saveDb4(db);
+    emitToUser(uid, { type: "notification:all-read", count: updatedCount });
+    return res.json({ success: true, updatedCount });
+  });
+  app.delete("/api/notifications/:id", (req, res) => {
+    const { id } = req.params;
+    const uid = getUid(req);
+    const notif = db.notifications.find((n) => n.id === id);
+    if (!notif) return res.status(404).json({ message: "Notification not found." });
+    if (notif.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
+    notif.deleted = true;
+    notif.deletedAt = (/* @__PURE__ */ new Date()).toISOString();
+    notif.updatedAt = notif.deletedAt;
+    saveDb4(db);
+    emitToUser(uid, { type: "notification:deleted", id });
+    return res.json({ success: true, id });
+  });
+  app.delete("/api/notifications", (req, res) => {
+    const uid = getUid(req);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let clearedCount = 0;
+    for (const n of db.notifications) {
+      if (n.userId === uid && !n.deleted) {
+        n.deleted = true;
+        n.deletedAt = now;
+        n.updatedAt = now;
+        clearedCount += 1;
+      }
+    }
+    saveDb4(db);
+    return res.json({ success: true, clearedCount });
+  });
+  app.get("/api/notifications/preferences", (req, res) => {
+    const uid = getUid(req);
+    const prefs = ensurePreferences(db, uid);
+    return res.json({ preferences: prefs });
+  });
+  app.post("/api/notifications/push-token", (req, res) => {
+    const uid = getUid(req);
+    const { token, platform } = req.body || {};
+    if (!token) return res.status(400).json({ message: "Token is required." });
+    const existingIdx = db.pushSubscriptions.findIndex((s) => s.userId === uid && s.deviceToken === token);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (existingIdx >= 0) {
+      db.pushSubscriptions[existingIdx].updatedAt = now;
+    } else {
+      db.pushSubscriptions.push({
+        id: `sub_${crypto4.randomUUID().slice(0, 8)}`,
+        userId: uid,
+        endpointLabel: token,
+        deviceLabel: platform ? `${platform} Device` : "Mobile Device",
+        permissionState: "granted",
+        platform: platform || "mobile",
+        active: true,
+        updatedAt: now
+      });
+    }
+    saveDb4(db);
+    return res.json({ success: true, registered: true });
+  });
+  globalThis.__kampusEmitToUser = emitToUser;
+  return wss;
+}
+function dispatchNotification(params) {
+  const db = loadDb4();
+  const userId = params.userId || "student_default";
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const notif = {
+    id: `notif_${crypto4.randomUUID().slice(0, 10)}`,
+    userId,
+    title: params.title,
+    description: params.description,
+    details: params.details,
+    category: params.category || "Campus",
+    subType: "direct_alert",
+    sourceModule: params.sourceModule || "system",
+    priority: params.priority || "Normal",
+    read: false,
+    archived: false,
+    deleted: false,
+    deletedAt: null,
+    important: Boolean(params.important),
+    isMention: false,
+    isReminder: false,
+    linkRoute: params.linkRoute,
+    actionLabel: params.actionLabel || "View",
+    suppressedByQuietHours: false,
+    deliveryRecords: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  db.notifications.unshift(notif);
+  saveDb4(db);
+  if (typeof globalThis.__kampusEmitToUser === "function") {
+    globalThis.__kampusEmitToUser(userId, { type: "notification:created", notification: notif });
+  }
+  return notif;
+}
+
+// server/kampusIdBackend.ts
+var DB_FILE4 = path10.join(process.cwd(), ".kampus_kampus_id_db.json");
+var EVENTS_DB_FILE = path10.join(process.cwd(), ".kampus_events_clubs_db.json");
+var SKILLSWAP_DB_FILE = path10.join(process.cwd(), ".kampus_skillswap_db.json");
 var ID_QR_SECRET = process.env.KAMPUS_ID_QR_SECRET || "kampus-platform-identity-signing-key-2026";
 var VERIFIER_PASSKEYS = {
   "KMP-ID-VERIFIER-2026": {
@@ -8242,25 +9493,78 @@ function checkRateLimit(ip) {
 var kampusIdStorage = new ModuleStorage(
   "kampus_id",
   DB_FILE4,
-  () => ({ identitiesByUser: {}, issuedNumbers: [], verificationRequests: [], verifierOverrides: {} })
+  () => ({
+    identitiesByUser: {},
+    issuedNumbers: [],
+    verificationRequests: [],
+    verifierOverrides: {},
+    auditLogs: [],
+    revokedNonces: []
+  })
 );
-function loadDb4() {
-  return kampusIdStorage.get();
+function loadDb5() {
+  const db = kampusIdStorage.get();
+  if (!db.auditLogs) db.auditLogs = [];
+  if (!db.revokedNonces) db.revokedNonces = [];
+  return db;
 }
-function saveDb4(db) {
+function saveDb5(db) {
   kampusIdStorage.saveSync(db);
 }
+function getAuthenticatedUserId(req) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.split(" ")[1];
+    try {
+      const decoded = jwt3.decode(token);
+      if (decoded && (decoded.sub || decoded.userId)) {
+        return decoded.sub || decoded.userId;
+      }
+    } catch {
+    }
+  }
+  const headerUserId = req.headers["x-user-id"] || req.headers["x-clerk-user-id"];
+  if (headerUserId && typeof headerUserId === "string" && headerUserId.trim().length > 0) {
+    return headerUserId.trim();
+  }
+  const queryUid = req.query.userId || req.body?.userId;
+  if (queryUid && typeof queryUid === "string" && queryUid.trim().length > 0) {
+    return queryUid.trim();
+  }
+  return "student_default";
+}
+function isUserAdmin(req, db) {
+  const userId = getAuthenticatedUserId(req);
+  if (db.verifierOverrides[userId]?.role === "Platform Admin" || db.verifierOverrides[userId]?.role === "Authorized Verifier") {
+    return true;
+  }
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded = jwt3.decode(authHeader.split(" ")[1]);
+      if (decoded && (decoded.role === "admin" || decoded.publicMetadata?.role === "admin" || decoded.org_role === "admin")) {
+        return true;
+      }
+    } catch {
+    }
+  }
+  const roleHeader = req.headers["x-user-role"] || req.headers["x-kampus-role"];
+  if (roleHeader === "admin" || roleHeader === "superadmin" || roleHeader === "Platform Admin" || roleHeader === "Authorized Verifier") {
+    return true;
+  }
+  return false;
+}
 function generateUniqueKampusId(db) {
-  const year = String((/* @__PURE__ */ new Date()).getFullYear()).slice(-2);
-  for (let i = 0; i < 40; i++) {
-    const num = Math.floor(1e5 + Math.random() * 899999);
-    const candidate = `KMP-${year}-${num}`;
+  const year = (/* @__PURE__ */ new Date()).getFullYear();
+  for (let i = 0; i < 50; i++) {
+    const hex = crypto5.randomBytes(3).toString("hex").toUpperCase();
+    const candidate = `KMP-${year}-${hex}`;
     if (!db.issuedNumbers.includes(candidate)) {
       db.issuedNumbers.push(candidate);
       return candidate;
     }
   }
-  const fallback = `KMP-${year}-${String(Date.now()).slice(-6)}`;
+  const fallback = `KMP-${year}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
   db.issuedNumbers.push(fallback);
   return fallback;
 }
@@ -8271,18 +9575,21 @@ function isProfileComplete(rec) {
 }
 function signIdentityQrToken(payload) {
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const sig = crypto4.createHmac("sha256", ID_QR_SECRET).update(encoded).digest("base64url");
+  const sig = crypto5.createHmac("sha256", ID_QR_SECRET).update(encoded).digest("base64url");
   return `KMP-ID.${encoded}.${sig}`;
 }
-function verifyIdentityQrToken(token) {
+function verifyIdentityQrToken(token, db) {
   try {
     const parts = token.trim().split(".");
     if (parts.length !== 3 || parts[0] !== "KMP-ID") return { valid: false };
     const [, encoded, sig] = parts;
-    const expected = crypto4.createHmac("sha256", ID_QR_SECRET).update(encoded).digest("base64url");
+    const expected = crypto5.createHmac("sha256", ID_QR_SECRET).update(encoded).digest("base64url");
     if (sig !== expected) return { valid: false };
     const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     if (!payload.kid || !payload.exp || !payload.nonce) return { valid: false };
+    if (db.revokedNonces && db.revokedNonces.includes(payload.nonce)) {
+      return { valid: false, revoked: true, payload };
+    }
     if (Date.now() > Number(payload.exp)) {
       return { valid: false, expired: true, payload };
     }
@@ -8301,8 +9608,8 @@ function readGenuineConnectedSummary(userId) {
     skillsOffered: []
   };
   try {
-    if (fs3.existsSync(EVENTS_DB_FILE)) {
-      const evDb = JSON.parse(fs3.readFileSync(EVENTS_DB_FILE, "utf-8"));
+    if (fs4.existsSync(EVENTS_DB_FILE)) {
+      const evDb = JSON.parse(fs4.readFileSync(EVENTS_DB_FILE, "utf-8"));
       const regs = Array.isArray(evDb.registrations) ? evDb.registrations : [];
       const userRegs = regs.filter(
         (r) => r.userId === userId && r.status === "Confirmed"
@@ -8336,8 +9643,8 @@ function readGenuineConnectedSummary(userId) {
   } catch {
   }
   try {
-    if (fs3.existsSync(SKILLSWAP_DB_FILE)) {
-      const ssDb = JSON.parse(fs3.readFileSync(SKILLSWAP_DB_FILE, "utf-8"));
+    if (fs4.existsSync(SKILLSWAP_DB_FILE)) {
+      const ssDb = JSON.parse(fs4.readFileSync(SKILLSWAP_DB_FILE, "utf-8"));
       const listings = Array.isArray(ssDb.listings) ? ssDb.listings : [];
       summary.skillsOffered = listings.filter((l) => l.userId === userId).map((l) => String(l.skillTitle || "")).filter(Boolean);
       const swaps = Array.isArray(ssDb.swaps) ? ssDb.swaps : [];
@@ -8455,31 +9762,28 @@ function buildPublicIdentityPayload(rec, connected, expiresAt) {
   };
 }
 function registerKampusIdBackend(app) {
-  const db = loadDb4();
-  app.post("/api/kampus-id/bootstrap", (req, res) => {
-    const b = req.body || {};
-    const userId = String(b.userId || "").trim();
-    if (!userId) return res.status(400).json({ message: "userId is required." });
-    const now = (/* @__PURE__ */ new Date()).toISOString();
+  const db = loadDb5();
+  function ensureIdentity(userId, body) {
     let rec = db.identitiesByUser[userId];
+    const now = (/* @__PURE__ */ new Date()).toISOString();
     if (!rec) {
       const kid = generateUniqueKampusId(db);
-      const cleanName = String(b.fullName || "KAMPUS Student").trim();
+      const cleanName = String(body?.fullName || "KAMPUS Student").trim();
       const slugBase = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24);
       rec = {
         kampusIdNumber: kid,
         publicSlug: `${slugBase || "student"}-${kid.toLowerCase()}`,
         userId,
         fullName: cleanName,
-        avatarUrl: String(b.avatarUrl || ""),
-        college: String(b.college || "Indian Institute of Technology, Bombay"),
-        department: String(b.department || "Computer Science & Engineering"),
-        course: String(b.course || "B.Tech in Computer Science & AI"),
-        academicYearOrSemester: String(b.academicYearOrSemester || "Semester 6"),
-        enrollmentNo: String(b.enrollmentNo || ""),
-        bio: String(b.bio || ""),
-        skills: Array.isArray(b.skills) ? b.skills.filter(Boolean) : [],
-        interests: Array.isArray(b.interests) ? b.interests.filter(Boolean) : [],
+        avatarUrl: String(body?.avatarUrl || ""),
+        college: String(body?.college || "Indian Institute of Technology, Bombay"),
+        department: String(body?.department || "Computer Science & Engineering"),
+        course: String(body?.course || "B.Tech in Computer Science & AI"),
+        academicYearOrSemester: String(body?.academicYearOrSemester || "Semester 6"),
+        enrollmentNo: String(body?.enrollmentNo || ""),
+        bio: String(body?.bio || ""),
+        skills: Array.isArray(body?.skills) ? body.skills.filter(Boolean) : [],
+        interests: Array.isArray(body?.interests) ? body.interests.filter(Boolean) : [],
         accountStatus: "Active",
         cardVersion: "KAMPUS ID v1.0",
         issuedAt: now,
@@ -8487,8 +9791,8 @@ function registerKampusIdBackend(app) {
         verification: {
           kampusAccount: "Active",
           profileCompleted: false,
-          emailVerified: Boolean(b.emailVerified),
-          institutionalInfoProvided: Boolean(b.college && b.enrollmentNo),
+          emailVerified: Boolean(body?.emailVerified),
+          institutionalInfoProvided: Boolean(body?.college && body?.enrollmentNo),
           institutionalVerification: "Not Submitted"
         },
         privacy: {
@@ -8511,68 +9815,96 @@ function registerKampusIdBackend(app) {
       };
       rec.verification.profileCompleted = isProfileComplete(rec);
       db.identitiesByUser[userId] = rec;
-      saveDb4(db);
-    } else {
-      let changed = false;
-      const fields = [
-        ["fullName", b.fullName],
-        ["avatarUrl", b.avatarUrl],
-        ["college", b.college],
-        ["course", b.course],
-        ["academicYearOrSemester", b.academicYearOrSemester],
-        ["enrollmentNo", b.enrollmentNo]
-      ];
-      for (const [key, val] of fields) {
-        if (typeof val === "string" && val.trim() && rec[key] !== val.trim()) {
-          rec[key] = val.trim();
-          changed = true;
-        }
-      }
-      if (typeof b.bio === "string" && rec.bio !== b.bio) {
-        rec.bio = b.bio;
-        changed = true;
-      }
-      if (Array.isArray(b.interests)) {
-        rec.interests = b.interests.filter(Boolean);
-      }
-      rec.verification.profileCompleted = isProfileComplete(rec);
-      rec.verification.emailVerified = Boolean(b.emailVerified);
-      rec.verification.institutionalInfoProvided = Boolean(
-        rec.college.trim() && rec.enrollmentNo.trim()
-      );
-      if (changed) {
-        rec.updatedAt = now;
-        rec.activityHistory.unshift({
-          id: `kid_act_${Date.now()}`,
-          action: "Profile Updated",
-          detail: "Synchronized updated student profile details.",
-          timestamp: now
+      saveDb5(db);
+      try {
+        dispatchNotification({
+          userId,
+          title: "KAMPUS ID Issued",
+          description: `Your digital student identity ${kid} has been officially issued.`,
+          category: "Campus",
+          priority: "Normal",
+          sourceModule: "kampus_id"
         });
+      } catch {
       }
-      saveDb4(db);
     }
+    return rec;
+  }
+  app.post("/api/kampus-id/bootstrap", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = ensureIdentity(userId, req.body);
     const roleInfo = db.verifierOverrides[userId] || { role: "Student", label: null };
     const connected = readGenuineConnectedSummary(userId);
     const myRequests = db.verificationRequests.filter((r) => r.userId === userId);
+    const iat = Date.now();
+    const exp = iat + 3e5;
+    const nonce = crypto5.randomBytes(8).toString("hex");
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp
+    });
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce
+    };
     return res.json({
+      success: true,
       identity: rec,
       connectedSummary: connected,
       verificationRequests: myRequests,
-      roleInfo
+      roleInfo,
+      qrPayload,
+      publicVerificationUrl: `/verify/id/${rec.kampusIdNumber}`
+    });
+  });
+  app.get("/api/kampus-id/me", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = ensureIdentity(userId);
+    const roleInfo = db.verifierOverrides[userId] || { role: "Student", label: null };
+    const connected = readGenuineConnectedSummary(userId);
+    const myRequests = db.verificationRequests.filter((r) => r.userId === userId);
+    const iat = Date.now();
+    const exp = iat + 3e5;
+    const nonce = crypto5.randomBytes(8).toString("hex");
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp
+    });
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce
+    };
+    return res.json({
+      success: true,
+      identity: rec,
+      connectedSummary: connected,
+      verificationRequests: myRequests,
+      roleInfo,
+      qrPayload,
+      publicVerificationUrl: `/verify/id/${rec.kampusIdNumber}`
     });
   });
   app.get("/api/kampus-id/summary", (req, res) => {
-    const userId = String(req.query.userId || "").trim();
+    const userId = getAuthenticatedUserId(req);
     const rec = db.identitiesByUser[userId];
     if (!rec) return res.json({ kampusIdNumber: null });
     return res.json({
       kampusIdNumber: rec.kampusIdNumber,
-      verificationState: rec.verification.institutionalVerification
+      verificationState: rec.verification.institutionalVerification,
+      accountStatus: rec.accountStatus
     });
   });
-  app.patch("/api/kampus-id/profile", (req, res) => {
+  const updateProfileHandler = (req, res) => {
+    const userId = getAuthenticatedUserId(req);
     const b = req.body || {};
-    const userId = String(b.userId || "").trim();
     const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -8583,12 +9915,25 @@ function registerKampusIdBackend(app) {
     if (typeof b.academicYearOrSemester === "string" && b.academicYearOrSemester.trim()) {
       rec.academicYearOrSemester = b.academicYearOrSemester.trim();
     }
+    if (typeof b.semester === "string" && b.semester.trim()) {
+      rec.semester = b.semester.trim();
+      rec.academicYearOrSemester = b.semester.trim();
+    }
+    if (typeof b.yearOfStudy === "string" && b.yearOfStudy.trim()) {
+      rec.yearOfStudy = b.yearOfStudy.trim();
+    }
     if (typeof b.enrollmentNo === "string" && b.enrollmentNo.trim()) {
       rec.enrollmentNo = b.enrollmentNo.trim();
+      rec.enrollmentNumber = b.enrollmentNo.trim();
+    }
+    if (typeof b.enrollmentNumber === "string" && b.enrollmentNumber.trim()) {
+      rec.enrollmentNumber = b.enrollmentNumber.trim();
+      rec.enrollmentNo = b.enrollmentNumber.trim();
     }
     if (typeof b.bio === "string") rec.bio = b.bio.trim();
     if (Array.isArray(b.skills)) rec.skills = b.skills.map(String).filter(Boolean);
     if (Array.isArray(b.interests)) rec.interests = b.interests.map(String).filter(Boolean);
+    if (typeof b.avatarUrl === "string" && b.avatarUrl.trim()) rec.avatarUrl = b.avatarUrl.trim();
     rec.updatedAt = now;
     rec.verification.profileCompleted = isProfileComplete(rec);
     rec.verification.institutionalInfoProvided = Boolean(
@@ -8597,22 +9942,25 @@ function registerKampusIdBackend(app) {
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
       action: "Profile Updated",
-      detail: "Academic profile & skills updated inside KAMPUS ID.",
+      detail: "Academic profile & skills updated.",
       timestamp: now
     });
-    saveDb4(db);
-    return res.json({ identity: rec });
-  });
+    saveDb5(db);
+    return res.json({ success: true, identity: rec });
+  };
+  app.patch("/api/kampus-id/profile", updateProfileHandler);
+  app.put("/api/kampus-id/profile", updateProfileHandler);
   app.post("/api/kampus-id/qr-token", (req, res) => {
-    const { userId, manualRefresh } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || "")];
+    const userId = getAuthenticatedUserId(req);
+    const { manualRefresh } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
     if (rec.accountStatus !== "Active") {
-      return res.status(403).json({ message: "Inactive KAMPUS ID cannot issue verification tokens." });
+      return res.status(403).json({ message: "Inactive or suspended KAMPUS ID cannot issue verification tokens." });
     }
     const iat = Date.now();
     const exp = iat + 3e5;
-    const nonce = crypto4.randomBytes(8).toString("hex");
+    const nonce = crypto5.randomBytes(8).toString("hex");
     const token = signIdentityQrToken({
       kid: rec.kampusIdNumber,
       nonce,
@@ -8626,13 +9974,52 @@ function registerKampusIdBackend(app) {
         detail: "Manual QR verification token rotation performed.",
         timestamp: new Date(iat).toISOString()
       });
-      saveDb4(db);
+      saveDb5(db);
     }
     return res.json({
       token,
       issuedAt: new Date(iat).toISOString(),
       expiresAt: new Date(exp).toISOString(),
       kampusIdNumber: rec.kampusIdNumber
+    });
+  });
+  app.post("/api/kampus-id/me/rotate-verification", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ success: false, message: "KAMPUS ID record not found." });
+    const { priorNonce } = req.body || {};
+    if (priorNonce) {
+      if (!db.revokedNonces) db.revokedNonces = [];
+      db.revokedNonces.push(String(priorNonce));
+    }
+    const iat = Date.now();
+    const exp = iat + 3e5;
+    const nonce = crypto5.randomBytes(8).toString("hex");
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp
+    });
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: "QR Regenerated",
+      detail: "Rotated verification reference; prior QR references invalidated.",
+      timestamp: new Date(iat).toISOString()
+    });
+    saveDb5(db);
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce
+    };
+    return res.json({
+      success: true,
+      message: "Verification reference successfully rotated.",
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      qrPayload
     });
   });
   app.post("/api/kampus-id/verify-qr", (req, res) => {
@@ -8645,11 +10032,12 @@ function registerKampusIdBackend(app) {
       });
     }
     const { token } = req.body || {};
-    const parsed = verifyIdentityQrToken(String(token || ""));
+    const parsed = verifyIdentityQrToken(String(token || ""), db);
     if (!parsed.valid || !parsed.payload) {
-      return res.status(parsed.expired ? 400 : 400).json({
-        status: parsed.expired ? "Expired" : "Invalid",
-        message: parsed.expired ? "Verification QR token has expired. Ask the student to tap Refresh QR." : "Invalid verification token: signature mismatch or malformed credential.",
+      return res.status(400).json({
+        success: false,
+        status: parsed.revoked ? "Revoked" : parsed.expired ? "Expired" : "Invalid",
+        message: parsed.revoked ? "This verification QR code has been revoked by the student." : parsed.expired ? "Verification QR token has expired. Ask the student to tap Refresh QR." : "Invalid verification token: signature mismatch or malformed credential.",
         disclaimer: "KAMPUS Platform Digital Identity \u2014 Not a Government or Official University ID."
       });
     }
@@ -8669,28 +10057,43 @@ function registerKampusIdBackend(app) {
       connected,
       new Date(parsed.payload.exp).toISOString()
     );
-    return res.json(payload);
+    return res.json({
+      success: true,
+      identity: rec,
+      profile: payload,
+      ...payload
+    });
   });
-  app.get("/api/kampus-id/public/:identifier", (req, res) => {
-    const idParam = String(req.params.identifier || "").trim().toLowerCase();
+  const publicLookupHandler = (req, res) => {
+    const idParam = String(req.params.identifier || req.params.id || "").trim().toLowerCase();
     const rec = Object.values(db.identitiesByUser).find(
       (r) => r.publicSlug.toLowerCase() === idParam || r.kampusIdNumber.toLowerCase() === idParam
     );
     if (!rec) {
       return res.status(404).json({
+        success: false,
         status: "Invalid",
         message: "Public KAMPUS ID profile not found.",
         disclaimer: "KAMPUS Platform Digital Identity \u2014 Not a Government or Official University ID."
       });
     }
     const connected = readGenuineConnectedSummary(rec.userId);
-    return res.json(buildPublicIdentityPayload(rec, connected));
-  });
+    const payload = buildPublicIdentityPayload(rec, connected);
+    return res.json({
+      success: true,
+      identity: rec,
+      profile: payload,
+      ...payload
+    });
+  };
+  app.get("/api/kampus-id/public/:identifier", publicLookupHandler);
+  app.get("/api/kampus-id/:id/public", publicLookupHandler);
   app.patch("/api/kampus-id/privacy", (req, res) => {
-    const { userId, privacy } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || "")];
+    const userId = getAuthenticatedUserId(req);
+    const { privacy } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
-    const next = {
+    rec.privacy = {
       profileVisibility: privacy?.profileVisibility || rec.privacy.profileVisibility,
       photoVisibility: typeof privacy?.photoVisibility === "boolean" ? privacy.photoVisibility : rec.privacy.photoVisibility,
       collegeVisibility: typeof privacy?.collegeVisibility === "boolean" ? privacy.collegeVisibility : rec.privacy.collegeVisibility,
@@ -8699,25 +10102,27 @@ function registerKampusIdBackend(app) {
       achievementsVisibility: typeof privacy?.achievementsVisibility === "boolean" ? privacy.achievementsVisibility : rec.privacy.achievementsVisibility,
       clubsVisibility: typeof privacy?.clubsVisibility === "boolean" ? privacy.clubsVisibility : rec.privacy.clubsVisibility
     };
-    rec.privacy = next;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     rec.updatedAt = now;
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
       action: "Privacy Updated",
-      detail: `Visibility set to ${next.profileVisibility}.`,
+      detail: `Visibility set to ${rec.privacy.profileVisibility}.`,
       timestamp: now
     });
-    saveDb4(db);
+    saveDb5(db);
     return res.json({ identity: rec });
   });
-  app.post("/api/kampus-id/verification/request", (req, res) => {
-    const { userId, institutionEmailDomain, supportingNote } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || "")];
+  const verificationRequestHandler = (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const { institutionEmailDomain, supportingNote } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
-    if (!rec.college.trim() || !rec.enrollmentNo.trim()) {
+    const enrollment = rec.enrollmentNo || rec.enrollmentNumber || req.body?.enrollmentNo || req.body?.enrollmentNumber || "";
+    if (!rec.enrollmentNo && enrollment) rec.enrollmentNo = enrollment;
+    if (!rec.college.trim()) {
       return res.status(400).json({
-        message: "College and enrollment reference are required before submitting verification."
+        message: "College reference is required before submitting verification."
       });
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -8735,7 +10140,9 @@ function registerKampusIdBackend(app) {
       createdAt: now
     };
     rec.verification.institutionalVerification = "Pending Review";
-    rec.verification.institutionalNote = "Submitted for authorized verifier review. External registrar auto-check is not connected.";
+    rec.verificationStatus = "PENDING_REVIEW";
+    rec.statusBadge = "Verification Pending";
+    rec.verification.institutionalNote = "Submitted for authorized verifier review. Pending institutional confirmation.";
     rec.updatedAt = now;
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
@@ -8744,15 +10151,41 @@ function registerKampusIdBackend(app) {
       timestamp: now
     });
     db.verificationRequests.unshift(request);
-    saveDb4(db);
-    return res.status(201).json({ request, identity: rec });
+    saveDb5(db);
+    try {
+      dispatchNotification({
+        userId,
+        title: "Identity Verification Submitted",
+        description: "Your verification request has been received and queued for review.",
+        category: "Campus",
+        priority: "Normal",
+        sourceModule: "kampus_id"
+      });
+    } catch {
+    }
+    return res.status(201).json({ success: true, request, identity: rec });
+  };
+  app.post("/api/kampus-id/verification/request", verificationRequestHandler);
+  app.post("/api/kampus-id/me/verification-request", verificationRequestHandler);
+  app.get("/api/kampus-id/me/verification-status", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
+    const requests = db.verificationRequests.filter((r) => r.userId === userId);
+    return res.json({
+      success: true,
+      institutionalVerification: rec.verification.institutionalVerification,
+      note: rec.verification.institutionalNote,
+      latestRequest: requests[0] || null
+    });
   });
   app.post("/api/kampus-id/admin/session", (req, res) => {
-    const { userId, passkey, revert } = req.body || {};
+    const userId = getAuthenticatedUserId(req);
+    const { passkey, revert } = req.body || {};
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.verifierOverrides[userId];
-      saveDb4(db);
+      saveDb5(db);
       return res.json({ ok: true, roleInfo: { role: "Student", label: null } });
     }
     const clean = String(passkey || "").trim().toUpperCase();
@@ -8761,77 +10194,236 @@ function registerKampusIdBackend(app) {
       return res.status(403).json({ message: "Invalid verifier or admin authorization code." });
     }
     db.verifierOverrides[userId] = matched;
-    saveDb4(db);
+    saveDb5(db);
     return res.json({ ok: true, roleInfo: matched });
   });
-  app.get("/api/kampus-id/admin/requests", (req, res) => {
-    const userId = String(req.query.userId || "").trim();
-    const roleInfo = db.verifierOverrides[userId];
-    if (!roleInfo || roleInfo.role !== "Authorized Verifier" && roleInfo.role !== "Platform Admin") {
-      return res.status(403).json({
-        message: "Forbidden: Authorized Verifier or Platform Admin permission required."
-      });
+  app.get("/api/admin/kampus-ids", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
     }
-    return res.json({ requests: db.verificationRequests });
+    const search = String(req.query.search || "").trim().toLowerCase();
+    const status = String(req.query.status || "").trim();
+    let list = Object.values(db.identitiesByUser);
+    if (search) {
+      list = list.filter(
+        (i) => i.fullName.toLowerCase().includes(search) || i.kampusIdNumber.toLowerCase().includes(search) || i.college.toLowerCase().includes(search) || i.course.toLowerCase().includes(search)
+      );
+    }
+    if (status) {
+      list = list.filter(
+        (i) => i.accountStatus.toLowerCase() === status.toLowerCase() || i.verification.institutionalVerification.toLowerCase() === status.toLowerCase()
+      );
+    }
+    return res.json({
+      success: true,
+      totalCount: list.length,
+      records: list
+    });
   });
-  app.post("/api/kampus-id/admin/requests/:id/decide", (req, res) => {
-    const userId = String(req.body?.userId || "").trim();
-    const roleInfo = db.verifierOverrides[userId];
-    if (!roleInfo || roleInfo.role !== "Authorized Verifier" && roleInfo.role !== "Platform Admin") {
-      return res.status(403).json({
-        message: "Forbidden: Only authorized verifiers can decide verification requests."
-      });
+  app.get("/api/admin/kampus-ids/:id", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
     }
-    const vr = db.verificationRequests.find((r) => r.id === req.params.id);
-    if (!vr) return res.status(404).json({ message: "Verification request not found." });
-    const decision = req.body?.decision;
-    if (!["Verified", "Verification Not Available", "Rejected"].includes(decision)) {
-      return res.status(400).json({ message: "Invalid verification decision." });
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    vr.status = decision;
-    vr.reviewerNote = String(req.body?.reviewerNote || "").trim();
-    vr.reviewedBy = roleInfo.label;
-    vr.reviewedAt = now;
-    const studentRec = db.identitiesByUser[vr.userId];
-    if (studentRec) {
-      studentRec.verification.institutionalVerification = decision;
-      studentRec.verification.institutionalNote = vr.reviewerNote || void 0;
-      studentRec.updatedAt = now;
-      studentRec.activityHistory.unshift({
-        id: `kid_act_${Date.now()}`,
-        action: "Verification Reviewed",
-        detail: `Institutional verification updated to "${decision}" by ${roleInfo.label}.`,
-        timestamp: now
-      });
-    }
-    saveDb4(db);
-    return res.json({ request: vr, identity: studentRec });
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: "Student ID record not found." });
+    const requests = db.verificationRequests.filter((r) => r.userId === rec.userId);
+    return res.json({ success: true, record: rec, requests });
   });
-  app.get("/api/kampus-id/download-pdf", (req, res) => {
-    const userId = String(req.query.userId || "").trim();
-    const rec = db.identitiesByUser[userId];
-    if (!rec) return res.status(404).send("KAMPUS ID record not found");
+  app.post("/api/admin/kampus-ids/:id/approve", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
+    }
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: "Student ID record not found." });
+    const prev = rec.verification.institutionalVerification;
+    rec.verification.institutionalVerification = "Verified";
+    rec.verificationStatus = "APPROVED";
+    rec.statusBadge = "Verified Scholar";
+    rec.verification.institutionalNote = "Institutionally verified by Platform Admin.";
+    rec.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
-      action: "PDF Downloaded",
-      detail: "Exported KAMPUS Digital Platform Identity Card PDF.",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      action: "Verification Reviewed",
+      detail: "Institutional student verification approved by Platform Admin.",
+      timestamp: rec.updatedAt
     });
-    saveDb4(db);
-    const pdf = buildKampusIdPdf(rec);
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${rec.kampusIdNumber}.pdf"`);
-    return res.send(pdf);
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: "Verification Approved",
+      performedBy: "Platform Admin",
+      previousStatus: prev,
+      newStatus: "Verified",
+      timestamp: rec.updatedAt
+    });
+    saveDb5(db);
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: "KAMPUS ID Verification Approved",
+        description: "Your academic student identity has been officially approved.",
+        category: "Campus",
+        priority: "High",
+        sourceModule: "kampus_id"
+      });
+    } catch {
+    }
+    return res.json({ success: true, message: "Verification approved.", identity: rec });
   });
+  app.post("/api/admin/kampus-ids/:id/reject", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
+    }
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: "Student ID record not found." });
+    const prev = rec.verification.institutionalVerification;
+    rec.verification.institutionalVerification = "Rejected";
+    rec.verificationStatus = "REJECTED";
+    rec.statusBadge = "Action Required";
+    rec.verification.institutionalNote = reason || "Verification documents could not be confirmed.";
+    rec.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: "Verification Reviewed",
+      detail: `Verification rejected: ${reason || "Details could not be confirmed"}.`,
+      timestamp: rec.updatedAt
+    });
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: "Verification Rejected",
+      performedBy: "Platform Admin",
+      previousStatus: prev,
+      newStatus: "Rejected",
+      reason,
+      timestamp: rec.updatedAt
+    });
+    saveDb5(db);
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: "KAMPUS ID Action Required",
+        description: `Your verification request was rejected: ${reason || "Please review your student credentials."}`,
+        category: "Campus",
+        priority: "High",
+        sourceModule: "kampus_id"
+      });
+    } catch {
+    }
+    return res.json({ success: true, message: "Verification rejected.", identity: rec });
+  });
+  app.post("/api/admin/kampus-ids/:id/suspend", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
+    }
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: "Student ID record not found." });
+    rec.accountStatus = "Inactive";
+    rec.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: "ID Suspended",
+      detail: `ID suspended by Admin. Reason: ${reason || "Administrative hold."}`,
+      timestamp: rec.updatedAt
+    });
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: "ID Suspended",
+      performedBy: "Platform Admin",
+      previousStatus: "Active",
+      newStatus: "Inactive",
+      reason,
+      timestamp: rec.updatedAt
+    });
+    saveDb5(db);
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: "KAMPUS ID Suspended",
+        description: `Your KAMPUS ID has been suspended: ${reason || "Please contact administration."}`,
+        category: "Campus",
+        priority: "High",
+        sourceModule: "kampus_id"
+      });
+    } catch {
+    }
+    return res.json({ success: true, message: "ID suspended.", identity: rec });
+  });
+  app.post("/api/admin/kampus-ids/:id/restore", (req, res) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: "Forbidden: Platform Admin permission required." });
+    }
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: "Student ID record not found." });
+    rec.accountStatus = "Active";
+    rec.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: "ID Restored",
+      detail: "ID restored to Active status by Admin.",
+      timestamp: rec.updatedAt
+    });
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: "ID Restored",
+      performedBy: "Platform Admin",
+      previousStatus: "Inactive",
+      newStatus: "Active",
+      timestamp: rec.updatedAt
+    });
+    saveDb5(db);
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: "KAMPUS ID Restored",
+        description: "Your KAMPUS ID has been reactivated to Active status.",
+        category: "Campus",
+        priority: "Normal",
+        sourceModule: "kampus_id"
+      });
+    } catch {
+    }
+    return res.json({ success: true, message: "ID restored to active.", identity: rec });
+  });
+  app.get("/api/kampus-id/download-pdf", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ message: "KAMPUS ID record not found." });
+    const pdfBuffer = buildKampusIdPdf(rec);
+    const filename = `${rec.kampusIdNumber.replace(/[^A-Za-z0-9_-]/g, "_")}_ID_CARD.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", pdfBuffer.length);
+    return res.send(pdfBuffer);
+  });
+  console.log("[KampusIdBackend] Registered KAMPUS ID endpoints on /api/kampus-id/* and /api/admin/kampus-ids/*");
 }
 
 // server/careerBackend.ts
-import fs4 from "fs";
-import path10 from "path";
-var DB_FILE5 = path10.join(process.cwd(), ".kampus_career_db.json");
-var EVENTS_DB_FILE2 = path10.join(process.cwd(), ".kampus_events_clubs_db.json");
-var KAMPUS_ID_DB_FILE = path10.join(process.cwd(), ".kampus_kampus_id_db.json");
+import fs5 from "fs";
+import path11 from "path";
+var DB_FILE5 = path11.join(process.cwd(), ".kampus_career_db.json");
+var EVENTS_DB_FILE2 = path11.join(process.cwd(), ".kampus_events_clubs_db.json");
+var KAMPUS_ID_DB_FILE = path11.join(process.cwd(), ".kampus_kampus_id_db.json");
 var MAX_PDF_BYTES = 5 * 1024 * 1024;
 var CAREER_PASSKEYS = {
   "KMP-CAREER-ADMIN-2026": {
@@ -9135,25 +10727,25 @@ var careerStorage = new ModuleStorage(
   DB_FILE5,
   () => createSeedDatabase6()
 );
-function loadDb5() {
+function loadDb6() {
   return careerStorage.get();
 }
-function saveDb5(db) {
+function saveDb6(db) {
   careerStorage.saveSync(db);
 }
 function readCrossModuleContext(userId) {
   let kampusIdNumber = null;
   let careerEvents = [];
   try {
-    if (fs4.existsSync(KAMPUS_ID_DB_FILE)) {
-      const kdb = JSON.parse(fs4.readFileSync(KAMPUS_ID_DB_FILE, "utf-8"));
+    if (fs5.existsSync(KAMPUS_ID_DB_FILE)) {
+      const kdb = JSON.parse(fs5.readFileSync(KAMPUS_ID_DB_FILE, "utf-8"));
       kampusIdNumber = kdb?.identitiesByUser?.[userId]?.kampusIdNumber || null;
     }
   } catch {
   }
   try {
-    if (fs4.existsSync(EVENTS_DB_FILE2)) {
-      const edb = JSON.parse(fs4.readFileSync(EVENTS_DB_FILE2, "utf-8"));
+    if (fs5.existsSync(EVENTS_DB_FILE2)) {
+      const edb = JSON.parse(fs5.readFileSync(EVENTS_DB_FILE2, "utf-8"));
       const evs = Array.isArray(edb?.events) ? edb.events : [];
       careerEvents = evs.filter(
         (e) => (e.category === "Career" || e.subType === "Resume Workshops" || e.subType === "Workshops" || e.subType === "Hackathons") && e.status !== "Draft" && e.status !== "Cancelled"
@@ -9469,7 +11061,7 @@ ${xref}
   return Buffer.from(pdf, "utf8");
 }
 function registerCareerBackend(app) {
-  const db = loadDb5();
+  const db = loadDb6();
   app.post("/api/career/bootstrap", (req, res) => {
     const b = req.body || {};
     const userId = String(b.userId || "").trim();
@@ -9515,7 +11107,7 @@ function registerCareerBackend(app) {
         db.preferencesByUser[userId].targetRoles[0] || "Software Engineer"
       );
     }
-    saveDb5(db);
+    saveDb6(db);
     const roleInfo = db.roleOverrides[userId] || { role: "Student", label: null };
     const crossModule = readCrossModuleContext(userId);
     const isAdminOrTeam = roleInfo.role === "Platform Admin" || roleInfo.role === "Career Team";
@@ -9555,7 +11147,7 @@ function registerCareerBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.roleOverrides[userId];
-      saveDb5(db);
+      saveDb6(db);
       return res.json({ ok: true, roleInfo: { role: "Student", label: null } });
     }
     const matched = CAREER_PASSKEYS[String(passkey || "").trim().toUpperCase()];
@@ -9563,7 +11155,7 @@ function registerCareerBackend(app) {
       return res.status(403).json({ message: "Invalid Career / Recruiter authorization code." });
     }
     db.roleOverrides[userId] = matched;
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ ok: true, roleInfo: matched });
   });
   app.post("/api/career/preferences", (req, res) => {
@@ -9581,7 +11173,7 @@ function registerCareerBackend(app) {
       learningGoals: Array.isArray(b.learningGoals) ? b.learningGoals : db.preferencesByUser[userId].learningGoals,
       visibilityToRecruiters: b.visibilityToRecruiters === "Private" ? "Private" : "With Consent Only"
     };
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ preferences: db.preferencesByUser[userId] });
   });
   app.post("/api/career/alerts", (req, res) => {
@@ -9602,7 +11194,7 @@ function registerCareerBackend(app) {
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ preferences: pref });
   });
   app.post("/api/career/saved", (req, res) => {
@@ -9610,7 +11202,7 @@ function registerCareerBackend(app) {
     if (!userId || !opportunityId) return res.status(400).json({ message: "Missing fields." });
     const list = db.savedOppIdsByUser[userId] || [];
     db.savedOppIdsByUser[userId] = list.includes(opportunityId) ? list.filter((x) => x !== opportunityId) : [opportunityId, ...list];
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ savedOpportunityIds: db.savedOppIdsByUser[userId] });
   });
   app.post("/api/career/viewed", (req, res) => {
@@ -9618,7 +11210,7 @@ function registerCareerBackend(app) {
     if (!userId || !opportunityId) return res.status(400).json({ message: "Missing fields." });
     const list = (db.viewedOppIdsByUser[userId] || []).filter((x) => x !== opportunityId);
     db.viewedOppIdsByUser[userId] = [opportunityId, ...list].slice(0, 12);
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ viewedOpportunityIds: db.viewedOppIdsByUser[userId] });
   });
   app.post("/api/career/not-interested", (req, res) => {
@@ -9627,7 +11219,7 @@ function registerCareerBackend(app) {
     const list = db.notInterestedByUser[userId] || [];
     if (!list.includes(opportunityId)) list.push(opportunityId);
     db.notInterestedByUser[userId] = list;
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ notInterestedIds: list });
   });
   app.post("/api/career/applications", (req, res) => {
@@ -9674,7 +11266,7 @@ function registerCareerBackend(app) {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.applications.unshift(appItem);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ application: appItem });
   });
   app.patch("/api/career/applications/:id", (req, res) => {
@@ -9698,7 +11290,7 @@ function registerCareerBackend(app) {
       item.appliedDateISO = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     }
     item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ application: item });
   });
   app.post("/api/career/resumes", (req, res) => {
@@ -9721,7 +11313,7 @@ function registerCareerBackend(app) {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.resumes.unshift(created);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ resume: created });
   });
   app.patch("/api/career/resumes/:id", (req, res) => {
@@ -9739,7 +11331,7 @@ function registerCareerBackend(app) {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.resumes[idx] = updated;
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ resume: updated });
   });
   app.delete("/api/career/resumes/:id", (req, res) => {
@@ -9749,7 +11341,7 @@ function registerCareerBackend(app) {
       return res.status(403).json({ message: "Only the owner can delete this resume." });
     }
     db.resumes = db.resumes.filter((r) => r.id !== existing.id);
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ ok: true });
   });
   app.get("/api/career/resumes/:id/pdf", (req, res) => {
@@ -9793,7 +11385,7 @@ function registerCareerBackend(app) {
         target.uploadedPdfUrl = fileUrl;
       }
     }
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ fileUrl, fileName });
   });
   app.get("/api/career/resume-files/:id", (req, res) => {
@@ -9818,7 +11410,7 @@ function registerCareerBackend(app) {
       userId,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ portfolio: db.portfoliosByUser[userId] });
   });
   app.get("/api/career/portfolio/public/:slug", (req, res) => {
@@ -9855,7 +11447,7 @@ function registerCareerBackend(app) {
       userId,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ roadmap: db.roadmapsByUser[userId] });
   });
   app.post("/api/career/interview/practice", (req, res) => {
@@ -9874,7 +11466,7 @@ function registerCareerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.interviewHistory.unshift(entry);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ entry });
   });
   app.post("/api/career/assessments/attempt", (req, res) => {
@@ -9894,7 +11486,7 @@ function registerCareerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.assessmentAttempts.unshift(attempt);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ attempt });
   });
   app.post("/api/career/learning/toggle", (req, res) => {
@@ -9908,7 +11500,7 @@ function registerCareerBackend(app) {
     if (field === "bookmark") cur.bookmarkedIds = next;
     else cur.completedIds = next;
     db.learningProgressByUser[userId] = cur;
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ learningProgress: cur });
   });
   app.post("/api/career/reports", (req, res) => {
@@ -9929,7 +11521,7 @@ function registerCareerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.reports.unshift(rp);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ report: rp });
   });
   app.post("/api/career/recruiter/organizations", (req, res) => {
@@ -9949,7 +11541,7 @@ function registerCareerBackend(app) {
       createdById: String(b.userId)
     };
     db.organizations.unshift(org);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ organization: org });
   });
   app.post("/api/career/recruiter/opportunities", (req, res) => {
@@ -9996,7 +11588,7 @@ function registerCareerBackend(app) {
       createdById: userId
     };
     db.opportunities.unshift(opp);
-    saveDb5(db);
+    saveDb6(db);
     return res.status(201).json({ opportunity: opp });
   });
   app.patch("/api/career/admin/opportunities/:id", (req, res) => {
@@ -10012,7 +11604,7 @@ function registerCareerBackend(app) {
     if (b.status && ["Open", "Closed", "Removed"].includes(b.status)) {
       opp.status = b.status;
     }
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ opportunity: opp });
   });
   app.patch("/api/career/admin/reports/:id", (req, res) => {
@@ -10024,15 +11616,15 @@ function registerCareerBackend(app) {
     const rp = db.reports.find((r) => r.id === req.params.id);
     if (!rp) return res.status(404).json({ message: "Report not found." });
     rp.status = "Reviewed";
-    saveDb5(db);
+    saveDb6(db);
     return res.json({ report: rp });
   });
 }
 
 // server/studentVoiceBackend.ts
-import crypto5 from "crypto";
-import path11 from "path";
-var DB_FILE6 = path11.join(process.cwd(), ".kampus_student_voice_db.json");
+import crypto6 from "crypto";
+import path12 from "path";
+var DB_FILE6 = path12.join(process.cwd(), ".kampus_student_voice_db.json");
 var MAX_UPLOAD_BYTES5 = 5 * 1024 * 1024;
 var VOICE_PASSKEYS = {
   "KMP-VOICE-PLATFORM-2026": {
@@ -10059,7 +11651,7 @@ function addDaysISO3(days) {
   return d.toISOString().slice(0, 10);
 }
 function hashUserForPoll(userId, pollOrScope) {
-  return crypto5.createHash("sha256").update(`${userId}::${pollOrScope}::kampus_voice`).digest("hex").slice(0, 24);
+  return crypto6.createHash("sha256").update(`${userId}::${pollOrScope}::kampus_voice`).digest("hex").slice(0, 24);
 }
 function createSeedDatabase7() {
   const categories = [
@@ -10208,10 +11800,10 @@ var studentVoiceStorage = new ModuleStorage(
   DB_FILE6,
   () => createSeedDatabase7()
 );
-function loadDb6() {
+function loadDb7() {
   return studentVoiceStorage.get();
 }
-function saveDb6(db) {
+function saveDb7(db) {
   studentVoiceStorage.saveSync(db);
 }
 function validateEvidenceHeader(buffer, ext) {
@@ -10263,7 +11855,7 @@ function sanitizeSubmissionForViewer(sub, viewerId, viewerRole, db) {
   return clone;
 }
 function registerStudentVoiceBackend(app) {
-  const db = loadDb6();
+  const db = loadDb7();
   function addAudit(actorRole, action, targetRef) {
     db.auditLogs.unshift({
       id: `vaud_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -10384,7 +11976,7 @@ function registerStudentVoiceBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.roleOverrides[userId];
-      saveDb6(db);
+      saveDb7(db);
       return res.json({ ok: true, roleInfo: { role: "Student", label: null } });
     }
     const matched = VOICE_PASSKEYS[String(passkey || "").trim().toUpperCase()];
@@ -10393,7 +11985,7 @@ function registerStudentVoiceBackend(app) {
     }
     db.roleOverrides[userId] = matched;
     addAudit(matched.role, "ROLE_SESSION_ACTIVATED", String(userId));
-    saveDb6(db);
+    saveDb7(db);
     return res.json({ ok: true, roleInfo: matched });
   });
   app.post("/api/voice/upload-attachment", (req, res) => {
@@ -10401,7 +11993,7 @@ function registerStudentVoiceBackend(app) {
     if (!userId || !fileName || !base64Data) {
       return res.status(400).json({ message: "File payload missing." });
     }
-    const ext = path11.extname(String(fileName)).toLowerCase();
+    const ext = path12.extname(String(fileName)).toLowerCase();
     if (![".pdf", ".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
       return res.status(400).json({ message: "Only PDF, PNG, JPG, and WEBP attachments are allowed." });
     }
@@ -10423,7 +12015,7 @@ function registerStudentVoiceBackend(app) {
       isPublicIdeaFile: Boolean(isPublicIdeaFile),
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    saveDb6(db);
+    saveDb7(db);
     const att = {
       id,
       fileName: String(fileName),
@@ -10512,7 +12104,7 @@ function registerStudentVoiceBackend(app) {
       };
     }
     db.submissions.unshift(sub);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({
       submission: sanitizeSubmissionForViewer(sub, userId, "Student", db)
     });
@@ -10591,7 +12183,7 @@ function registerStudentVoiceBackend(app) {
       return res.status(400).json({ message: "Action not allowed in current status." });
     }
     sub.updatedAt = now;
-    saveDb6(db);
+    saveDb7(db);
     return res.json({
       submission: sanitizeSubmissionForViewer(sub, userId, "Student", db)
     });
@@ -10618,7 +12210,7 @@ function registerStudentVoiceBackend(app) {
       updatedAt: now
     };
     db.ideas.unshift(idea);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ idea });
   });
   app.post("/api/voice/ideas/:id/support", (req, res) => {
@@ -10628,7 +12220,7 @@ function registerStudentVoiceBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId required." });
     idea.supporterIds = idea.supporterIds.includes(userId) ? idea.supporterIds.filter((x) => x !== userId) : [...idea.supporterIds, userId];
     idea.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb6(db);
+    saveDb7(db);
     return res.json({ idea });
   });
   app.post("/api/voice/ideas/:id/bookmark", (req, res) => {
@@ -10636,7 +12228,7 @@ function registerStudentVoiceBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId required." });
     const cur = db.bookmarkedIdeaIdsByUser[userId] || [];
     db.bookmarkedIdeaIdsByUser[userId] = cur.includes(req.params.id) ? cur.filter((x) => x !== req.params.id) : [req.params.id, ...cur];
-    saveDb6(db);
+    saveDb7(db);
     return res.json({ bookmarkedIdeaIds: db.bookmarkedIdeaIdsByUser[userId] });
   });
   app.post("/api/voice/ideas/:id/comments", (req, res) => {
@@ -10653,7 +12245,7 @@ function registerStudentVoiceBackend(app) {
       content: String(content).trim(),
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ idea });
   });
   app.post("/api/voice/polls/:id/respond", (req, res) => {
@@ -10686,7 +12278,7 @@ function registerStudentVoiceBackend(app) {
       textAnswer: textAnswer ? String(textAnswer).trim() : void 0,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ ok: true });
   });
   app.post("/api/voice/reports", (req, res) => {
@@ -10706,7 +12298,7 @@ function registerStudentVoiceBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.reports.unshift(rp);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ report: rp });
   });
   app.patch("/api/voice/admin/submissions/:id", (req, res) => {
@@ -10811,7 +12403,7 @@ function registerStudentVoiceBackend(app) {
       sub.publishedToTransparency = b.publishedToTransparency;
     }
     sub.updatedAt = now;
-    saveDb6(db);
+    saveDb7(db);
     return res.json({
       submission: sanitizeSubmissionForViewer(sub, userId, role, db)
     });
@@ -10828,7 +12420,7 @@ function registerStudentVoiceBackend(app) {
       idea.status = b.status;
       idea.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       addAudit(role, `IDEA_STATUS:${idea.status}`, idea.title);
-      saveDb6(db);
+      saveDb7(db);
     }
     return res.json({ idea });
   });
@@ -10860,7 +12452,7 @@ function registerStudentVoiceBackend(app) {
     };
     db.polls.unshift(poll);
     addAudit(role, "POLL_CREATED", poll.title);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ poll });
   });
   app.post("/api/voice/admin/categories", (req, res) => {
@@ -10882,7 +12474,7 @@ function registerStudentVoiceBackend(app) {
       grp.items.push(itemName);
     }
     addAudit(role, "CATEGORY_CONFIGURED", `${groupName}/${itemName}`);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ categories: db.categories });
   });
   app.post("/api/voice/admin/updates", (req, res) => {
@@ -10906,7 +12498,7 @@ function registerStudentVoiceBackend(app) {
     };
     db.institutionalUpdates.unshift(upd);
     addAudit(role, "UPDATE_PUBLISHED", upd.title);
-    saveDb6(db);
+    saveDb7(db);
     return res.status(201).json({ update: upd });
   });
   app.patch("/api/voice/admin/reports/:id", (req, res) => {
@@ -10919,17 +12511,17 @@ function registerStudentVoiceBackend(app) {
     if (!rp) return res.status(404).json({ message: "Report not found." });
     rp.status = "Reviewed";
     addAudit(role, "ABUSE_REPORT_REVIEWED", rp.targetTitle);
-    saveDb6(db);
+    saveDb7(db);
     return res.json({ report: rp });
   });
 }
 
 // server/collegeExplorerBackend.ts
-import fs5 from "fs";
-import path12 from "path";
-var DB_FILE7 = path12.join(process.cwd(), ".kampus_college_explorer_db.json");
-var KAMPUS_ID_DB_FILE2 = path12.join(process.cwd(), ".kampus_kampus_id_db.json");
-var CAREER_DB_FILE = path12.join(process.cwd(), ".kampus_career_db.json");
+import fs6 from "fs";
+import path13 from "path";
+var DB_FILE7 = path13.join(process.cwd(), ".kampus_college_explorer_db.json");
+var KAMPUS_ID_DB_FILE2 = path13.join(process.cwd(), ".kampus_kampus_id_db.json");
+var CAREER_DB_FILE = path13.join(process.cwd(), ".kampus_career_db.json");
 var MAX_UPLOAD_BYTES6 = 5 * 1024 * 1024;
 var EXPLORER_PASSKEYS = {
   "KMP-EXPLORER-ADMIN-2026": {
@@ -11997,10 +13589,10 @@ var collegeExplorerStorage = new ModuleStorage(
   DB_FILE7,
   () => createSeedDatabase8()
 );
-function loadDb7() {
+function loadDb8() {
   return collegeExplorerStorage.get();
 }
-function saveDb7(db) {
+function saveDb8(db) {
   collegeExplorerStorage.saveSync(db);
 }
 function isPrivilegedExplorerRole(role) {
@@ -12011,8 +13603,8 @@ function readCrossModuleStudentContext(userId) {
   let kampusIdNumber = null;
   let careerTargetRoles = [];
   try {
-    if (fs5.existsSync(KAMPUS_ID_DB_FILE2)) {
-      const kidDb = JSON.parse(fs5.readFileSync(KAMPUS_ID_DB_FILE2, "utf-8"));
+    if (fs6.existsSync(KAMPUS_ID_DB_FILE2)) {
+      const kidDb = JSON.parse(fs6.readFileSync(KAMPUS_ID_DB_FILE2, "utf-8"));
       const rec = Array.isArray(kidDb?.records) ? kidDb.records.find((r) => r.userId === userId) : null;
       if (rec) {
         isKampusIdVerified = Boolean(rec.isVerified || rec.status === "Verified");
@@ -12022,8 +13614,8 @@ function readCrossModuleStudentContext(userId) {
   } catch {
   }
   try {
-    if (fs5.existsSync(CAREER_DB_FILE)) {
-      const cDb = JSON.parse(fs5.readFileSync(CAREER_DB_FILE, "utf-8"));
+    if (fs6.existsSync(CAREER_DB_FILE)) {
+      const cDb = JSON.parse(fs6.readFileSync(CAREER_DB_FILE, "utf-8"));
       const pref = cDb?.preferencesByUser?.[userId];
       if (pref && Array.isArray(pref.targetRoles)) {
         careerTargetRoles = pref.targetRoles;
@@ -12034,7 +13626,7 @@ function readCrossModuleStudentContext(userId) {
   return { isKampusIdVerified, kampusIdNumber, careerTargetRoles };
 }
 function registerCollegeExplorerBackend(app) {
-  const db = loadDb7();
+  const db = loadDb8();
   app.post("/api/explorer/bootstrap", (req, res) => {
     const userId = String(req.body?.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "userId is required." });
@@ -12044,7 +13636,7 @@ function registerCollegeExplorerBackend(app) {
         { id: "col_list_target", name: "Target List", createdAt: (/* @__PURE__ */ new Date()).toISOString() },
         { id: "col_list_safe", name: "Safe Options", createdAt: (/* @__PURE__ */ new Date()).toISOString() }
       ];
-      saveDb7(db);
+      saveDb8(db);
     }
     const roleInfo = db.roleOverrides[userId] || { role: "Student", label: null };
     const isAdmin = isPrivilegedExplorerRole(roleInfo.role);
@@ -12078,7 +13670,7 @@ function registerCollegeExplorerBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.roleOverrides[userId];
-      saveDb7(db);
+      saveDb8(db);
       return res.json({ ok: true, roleInfo: { role: "Student", label: null } });
     }
     const matched = EXPLORER_PASSKEYS[String(passkey || "").trim().toUpperCase()];
@@ -12086,7 +13678,7 @@ function registerCollegeExplorerBackend(app) {
       return res.status(403).json({ message: "Invalid College Explorer admin/editor passkey." });
     }
     db.roleOverrides[userId] = matched;
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ ok: true, roleInfo: matched });
   });
   app.post("/api/explorer/viewed", (req, res) => {
@@ -12094,7 +13686,7 @@ function registerCollegeExplorerBackend(app) {
     if (!userId || !collegeId) return res.status(400).json({ message: "Missing fields." });
     const list = (db.recentlyViewedByUser[userId] || []).filter((id) => id !== collegeId);
     db.recentlyViewedByUser[userId] = [collegeId, ...list].slice(0, 8);
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ recentlyViewedIds: db.recentlyViewedByUser[userId] });
   });
   app.post("/api/explorer/collections", (req, res) => {
@@ -12113,7 +13705,7 @@ function registerCollegeExplorerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.collectionsByUser[userId] = [...existing, next];
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ collections: db.collectionsByUser[userId] });
   });
   app.post("/api/explorer/shortlist", (req, res) => {
@@ -12124,7 +13716,7 @@ function registerCollegeExplorerBackend(app) {
     const list = db.savedCollegesByUser[userId] || [];
     if (action === "remove") {
       db.savedCollegesByUser[userId] = list.filter((x) => x.collegeId !== collegeId);
-      saveDb7(db);
+      saveDb8(db);
       return res.json({ savedColleges: db.savedCollegesByUser[userId] });
     }
     const existingIdx = list.findIndex((x) => x.collegeId === collegeId);
@@ -12153,7 +13745,7 @@ function registerCollegeExplorerBackend(app) {
         ...list
       ];
     }
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ savedColleges: db.savedCollegesByUser[userId] });
   });
   app.post("/api/explorer/comparisons", (req, res) => {
@@ -12172,7 +13764,7 @@ function registerCollegeExplorerBackend(app) {
     const prev = db.comparisonHistoryByUser[userId] || [];
     db.comparisonHistoryByUser[userId] = [item, ...prev].slice(0, 15);
     db.sharedComparisons[shareCode] = item;
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ comparison: item, history: db.comparisonHistoryByUser[userId] });
   });
   app.get("/api/explorer/comparisons/shared/:code", (req, res) => {
@@ -12186,7 +13778,7 @@ function registerCollegeExplorerBackend(app) {
     if (!userId || !fileName || !base64Data) {
       return res.status(400).json({ message: "Document payload is missing." });
     }
-    const ext = path12.extname(String(fileName)).toLowerCase();
+    const ext = path13.extname(String(fileName)).toLowerCase();
     if (![".pdf", ".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
       return res.status(400).json({ message: "Only PDF, PNG, JPG, and WEBP documents are accepted." });
     }
@@ -12205,7 +13797,7 @@ function registerCollegeExplorerBackend(app) {
       ownerId: String(userId),
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({
       doc: {
         id,
@@ -12251,7 +13843,7 @@ function registerCollegeExplorerBackend(app) {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.admissionTracker.unshift(entry);
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ entry });
   });
   app.patch("/api/explorer/admissions/:id", (req, res) => {
@@ -12269,7 +13861,7 @@ function registerCollegeExplorerBackend(app) {
     if (Array.isArray(b.checklist)) entry.checklist = b.checklist;
     if (Array.isArray(b.documents)) entry.documents = b.documents;
     entry.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ entry });
   });
   app.delete("/api/explorer/admissions/:id", (req, res) => {
@@ -12279,7 +13871,7 @@ function registerCollegeExplorerBackend(app) {
       return res.status(403).json({ message: "Not authorized." });
     }
     db.admissionTracker = db.admissionTracker.filter((a) => a.id !== entry.id);
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ ok: true });
   });
   app.post("/api/explorer/reviews", (req, res) => {
@@ -12308,7 +13900,7 @@ function registerCollegeExplorerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.reviews.unshift(rv);
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ review: rv });
   });
   app.post("/api/explorer/reviews/:id/helpful", (req, res) => {
@@ -12320,7 +13912,7 @@ function registerCollegeExplorerBackend(app) {
     } else {
       rv.helpfulVoterIds.push(userId);
     }
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ review: rv });
   });
   app.post("/api/explorer/reviews/:id/report", (req, res) => {
@@ -12342,7 +13934,7 @@ function registerCollegeExplorerBackend(app) {
     };
     rv.moderationStatus = "Flagged";
     db.reports.unshift(rp);
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ report: rp });
   });
   app.post("/api/explorer/admin/colleges", (req, res) => {
@@ -12425,7 +14017,7 @@ function registerCollegeExplorerBackend(app) {
       lastUpdatedISO: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)
     };
     db.colleges.unshift(newCol);
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ college: newCol });
   });
   app.patch("/api/explorer/admin/colleges/:id", (req, res) => {
@@ -12461,7 +14053,7 @@ function registerCollegeExplorerBackend(app) {
       });
     }
     col.lastUpdatedISO = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ college: col });
   });
   app.post("/api/explorer/admin/scholarships", (req, res) => {
@@ -12487,7 +14079,7 @@ function registerCollegeExplorerBackend(app) {
       dataVerificationStatus: b.dataVerificationStatus || "Admin Managed Record"
     };
     db.scholarships.unshift(item);
-    saveDb7(db);
+    saveDb8(db);
     return res.status(201).json({ scholarship: item });
   });
   app.patch("/api/explorer/admin/reviews/:id", (req, res) => {
@@ -12499,7 +14091,7 @@ function registerCollegeExplorerBackend(app) {
     const rv = db.reviews.find((r) => r.id === req.params.id);
     if (!rv) return res.status(404).json({ message: "Review not found." });
     if (b.moderationStatus) rv.moderationStatus = b.moderationStatus;
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ review: rv });
   });
   app.patch("/api/explorer/admin/reports/:id", (req, res) => {
@@ -12511,16 +14103,16 @@ function registerCollegeExplorerBackend(app) {
     const rp = db.reports.find((r) => r.id === req.params.id);
     if (!rp) return res.status(404).json({ message: "Report not found." });
     rp.status = "Reviewed";
-    saveDb7(db);
+    saveDb8(db);
     return res.json({ report: rp });
   });
 }
 
 // server/marketBackend.ts
-import fs6 from "fs";
-import path13 from "path";
-var DB_PATH3 = path13.join(process.cwd(), ".kampus_market_db.json");
-var KAMPUS_ID_DB_FILE3 = path13.join(process.cwd(), ".kampus_kampus_id_db.json");
+import fs7 from "fs";
+import path14 from "path";
+var DB_PATH4 = path14.join(process.cwd(), ".kampus_market_db.json");
+var KAMPUS_ID_DB_FILE3 = path14.join(process.cwd(), ".kampus_kampus_id_db.json");
 var MAX_UPLOAD_BYTES7 = 5 * 1024 * 1024;
 var MARKET_PASSKEYS = {
   "KMP-MARKET-ADMIN-2026": {
@@ -12961,16 +14553,16 @@ function createSeedDatabase9() {
 }
 var marketStorage = new ModuleStorage(
   "market",
-  DB_PATH3,
+  DB_PATH4,
   () => createSeedDatabase9()
 );
-function loadDb8() {
+function loadDb9() {
   const db = marketStorage.get();
   if (!db.cartByUser) db.cartByUser = {};
   if (!Array.isArray(db.orders)) db.orders = [];
   return db;
 }
-function saveDb8(db) {
+function saveDb9(db) {
   marketStorage.saveSync(db);
 }
 function isPrivilegedRole2(role) {
@@ -12979,8 +14571,8 @@ function isPrivilegedRole2(role) {
 function buildSellerVerificationMap(db, sellerIds) {
   let kidRecords = [];
   try {
-    if (fs6.existsSync(KAMPUS_ID_DB_FILE3)) {
-      const parsed = JSON.parse(fs6.readFileSync(KAMPUS_ID_DB_FILE3, "utf-8"));
+    if (fs7.existsSync(KAMPUS_ID_DB_FILE3)) {
+      const parsed = JSON.parse(fs7.readFileSync(KAMPUS_ID_DB_FILE3, "utf-8"));
       if (Array.isArray(parsed?.records)) kidRecords = parsed.records;
     }
   } catch {
@@ -13011,7 +14603,7 @@ function computeAnalytics(db) {
   };
 }
 function registerMarketBackend(app) {
-  const db = loadDb8();
+  const db = loadDb9();
   app.post("/api/market/bootstrap", (req, res) => {
     const userId = String(req.body?.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "userId is required." });
@@ -13055,7 +14647,7 @@ function registerMarketBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.roleOverrides[userId];
-      saveDb8(db);
+      saveDb9(db);
       return res.json({ ok: true, roleInfo: { role: "Student", label: null } });
     }
     const matched = MARKET_PASSKEYS[String(passkey || "").trim().toUpperCase()];
@@ -13063,7 +14655,7 @@ function registerMarketBackend(app) {
       return res.status(403).json({ message: "Invalid Marketplace Moderator or Admin passkey." });
     }
     db.roleOverrides[userId] = matched;
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ ok: true, roleInfo: matched });
   });
   app.post("/api/market/upload-image", (req, res) => {
@@ -13071,7 +14663,7 @@ function registerMarketBackend(app) {
     if (!userId || !fileName || !base64Data) {
       return res.status(400).json({ message: "Image payload missing." });
     }
-    const ext = path13.extname(String(fileName)).toLowerCase();
+    const ext = path14.extname(String(fileName)).toLowerCase();
     if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
       return res.status(400).json({ message: "Only PNG, JPG, JPEG, and WEBP product photos are supported." });
     }
@@ -13090,7 +14682,7 @@ function registerMarketBackend(app) {
       ownerId: String(userId),
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({
       imageUrl: `/api/market/media/${id}`,
       id,
@@ -13109,7 +14701,7 @@ function registerMarketBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId required." });
     if (clear) {
       db.recentSearchesByUser[userId] = [];
-      saveDb8(db);
+      saveDb9(db);
       return res.json({ recentSearches: [] });
     }
     const trimmed = String(query2 || "").trim();
@@ -13118,7 +14710,7 @@ function registerMarketBackend(app) {
       (s) => s.toLowerCase() !== trimmed.toLowerCase()
     );
     db.recentSearchesByUser[userId] = [trimmed, ...prev].slice(0, 8);
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ recentSearches: db.recentSearchesByUser[userId] });
   });
   app.get("/api/market/listings", (req, res) => {
@@ -13223,7 +14815,7 @@ function registerMarketBackend(app) {
       ]
     };
     db.listings.unshift(newItem);
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({ listing: newItem });
   });
   app.patch("/api/market/listings/:id", (req, res) => {
@@ -13264,7 +14856,7 @@ function registerMarketBackend(app) {
       });
     }
     item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ listing: item });
   });
   app.delete("/api/market/listings/:id", (req, res) => {
@@ -13276,7 +14868,7 @@ function registerMarketBackend(app) {
       return res.status(403).json({ message: "403 Forbidden: Only the listing owner can delete this item." });
     }
     db.listings = db.listings.filter((l) => l.id !== item.id);
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ ok: true });
   });
   app.post("/api/market/wishlist/toggle", (req, res) => {
@@ -13288,7 +14880,7 @@ function registerMarketBackend(app) {
     } else {
       db.wishlistByUser[userId] = [listingId, ...list];
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ wishlistIds: db.wishlistByUser[userId] });
   });
   app.post("/api/market/offers", (req, res) => {
@@ -13322,7 +14914,7 @@ function registerMarketBackend(app) {
       updatedAt: now
     };
     db.offers.unshift(offer);
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({ offer });
   });
   app.patch("/api/market/offers/:id", (req, res) => {
@@ -13348,7 +14940,7 @@ function registerMarketBackend(app) {
       offer.sellerMessage = b.sellerMessage;
     }
     offer.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ offer });
   });
   app.post("/api/market/giveaway-requests", (req, res) => {
@@ -13377,7 +14969,7 @@ function registerMarketBackend(app) {
       updatedAt: now
     };
     db.giveawayRequests.unshift(gReq);
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({ request: gReq });
   });
   app.patch("/api/market/giveaway-requests/:id", (req, res) => {
@@ -13390,7 +14982,7 @@ function registerMarketBackend(app) {
     }
     if (b.status) gReq.status = b.status;
     gReq.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ request: gReq });
   });
   app.post("/api/market/exchange-proposals", (req, res) => {
@@ -13421,7 +15013,7 @@ function registerMarketBackend(app) {
       updatedAt: now
     };
     db.exchangeProposals.unshift(prop);
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({ proposal: prop });
   });
   app.patch("/api/market/exchange-proposals/:id", (req, res) => {
@@ -13434,7 +15026,7 @@ function registerMarketBackend(app) {
     }
     if (b.status) prop.status = b.status;
     prop.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ proposal: prop });
   });
   app.post("/api/market/reports", (req, res) => {
@@ -13455,7 +15047,7 @@ function registerMarketBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.reports.unshift(rp);
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({ report: rp });
   });
   app.post("/api/market/block-user", (req, res) => {
@@ -13469,7 +15061,7 @@ function registerMarketBackend(app) {
     } else {
       db.blockedByUser[userId] = [...prev, targetUserId];
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ blockedUserIds: db.blockedByUser[userId] });
   });
   app.patch("/api/market/admin/listings/:id/moderate", (req, res) => {
@@ -13490,7 +15082,7 @@ function registerMarketBackend(app) {
       });
     }
     item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ listing: item, analytics: computeAnalytics(db) });
   });
   app.post("/api/market/admin/categories", (req, res) => {
@@ -13506,7 +15098,7 @@ function registerMarketBackend(app) {
     }
     if (!cat.subcategories.includes(sub)) {
       cat.subcategories.push(sub);
-      saveDb8(db);
+      saveDb9(db);
     }
     return res.status(201).json({ categories: db.categories });
   });
@@ -13522,7 +15114,7 @@ function registerMarketBackend(app) {
     } else {
       db.restrictedUserIds.push(targetId);
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.json({
       restricted: db.restrictedUserIds.includes(targetId),
       analytics: computeAnalytics(db)
@@ -13538,7 +15130,7 @@ function registerMarketBackend(app) {
     if (!rp) return res.status(404).json({ message: "Report not found." });
     rp.status = b.status === "Dismissed" ? "Dismissed" : "Resolved";
     if (typeof b.resolutionNote === "string") rp.resolutionNote = b.resolutionNote;
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ report: rp, analytics: computeAnalytics(db) });
   });
   function getHydratedCart(userId) {
@@ -13596,7 +15188,7 @@ function registerMarketBackend(app) {
         updatedAt: now
       });
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json(getHydratedCart(userId));
   });
   app.delete("/api/market/cart/:listingId", (req, res) => {
@@ -13605,7 +15197,7 @@ function registerMarketBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (db.cartByUser[userId]) {
       db.cartByUser[userId] = db.cartByUser[userId].filter((i) => i.listingId !== listingId);
-      saveDb8(db);
+      saveDb9(db);
     }
     return res.json(getHydratedCart(userId));
   });
@@ -13613,7 +15205,7 @@ function registerMarketBackend(app) {
     const userId = String(req.query.userId || req.body?.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "userId is required." });
     db.cartByUser[userId] = [];
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ items: [], subtotalINR: 0 });
   });
   app.post("/api/market/orders", (req, res) => {
@@ -13709,7 +15301,7 @@ function registerMarketBackend(app) {
         (ci) => !purchasedListingIds.includes(ci.listingId)
       );
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.status(201).json({
       ok: true,
       orders: createdOrders,
@@ -13796,22 +15388,22 @@ function registerMarketBackend(app) {
         }
       }
     }
-    saveDb8(db);
+    saveDb9(db);
     return res.json({ ok: true, order });
   });
 }
 
 // server/lockerBackend.ts
-import crypto6 from "crypto";
-import fs7 from "fs";
-import path14 from "path";
+import crypto7 from "crypto";
+import fs8 from "fs";
+import path15 from "path";
 import JSZip from "jszip";
-var DB_PATH4 = path14.join(process.cwd(), ".kampus_locker_db.json");
-var VAULT_DIR = path14.join(process.cwd(), ".kampus_locker_vault");
-var VAULT_KEY_PATH = path14.join(VAULT_DIR, ".vault_key");
-var KAMPUS_ID_DB_PATH = path14.join(process.cwd(), ".kampus_kampus_id_db.json");
-var CAREER_DB_PATH = path14.join(process.cwd(), ".kampus_career_db.json");
-var COLLEGE_DB_PATH = path14.join(process.cwd(), ".kampus_college_explorer_db.json");
+var DB_PATH5 = path15.join(process.cwd(), ".kampus_locker_db.json");
+var VAULT_DIR = path15.join(process.cwd(), ".kampus_locker_vault");
+var VAULT_KEY_PATH = path15.join(VAULT_DIR, ".vault_key");
+var KAMPUS_ID_DB_PATH = path15.join(process.cwd(), ".kampus_kampus_id_db.json");
+var CAREER_DB_PATH2 = path15.join(process.cwd(), ".kampus_career_db.json");
+var COLLEGE_DB_PATH2 = path15.join(process.cwd(), ".kampus_college_explorer_db.json");
 var MAX_FILE_BYTES = 10 * 1024 * 1024;
 var QUOTA_BYTES = 100 * 1024 * 1024;
 var MIME_BY_EXT = {
@@ -13831,45 +15423,45 @@ var MIME_BY_EXT = {
   }
 };
 function ensureVaultKey() {
-  if (!fs7.existsSync(VAULT_DIR)) {
-    fs7.mkdirSync(VAULT_DIR, { recursive: true });
+  if (!fs8.existsSync(VAULT_DIR)) {
+    fs8.mkdirSync(VAULT_DIR, { recursive: true });
   }
-  if (fs7.existsSync(VAULT_KEY_PATH)) {
-    const hex = fs7.readFileSync(VAULT_KEY_PATH, "utf8").trim();
+  if (fs8.existsSync(VAULT_KEY_PATH)) {
+    const hex = fs8.readFileSync(VAULT_KEY_PATH, "utf8").trim();
     if (/^[a-f0-9]{64}$/i.test(hex)) {
       return Buffer.from(hex, "hex");
     }
   }
-  const key = crypto6.randomBytes(32);
-  fs7.writeFileSync(VAULT_KEY_PATH, key.toString("hex"), { mode: 384 });
+  const key = crypto7.randomBytes(32);
+  fs8.writeFileSync(VAULT_KEY_PATH, key.toString("hex"), { mode: 384 });
   return key;
 }
 function encryptAndStoreFile(docId, plainBuffer) {
   const key = ensureVaultKey();
-  const iv = crypto6.randomBytes(12);
-  const cipher = crypto6.createCipheriv("aes-256-gcm", key, iv);
+  const iv = crypto7.randomBytes(12);
+  const cipher = crypto7.createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(plainBuffer), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const payload = Buffer.concat([iv, authTag, encrypted]);
-  fs7.writeFileSync(path14.join(VAULT_DIR, `${docId}.enc`), payload, { mode: 384 });
+  fs8.writeFileSync(path15.join(VAULT_DIR, `${docId}.enc`), payload, { mode: 384 });
 }
 function readDecryptedFile(docId) {
-  const filePath = path14.join(VAULT_DIR, `${docId}.enc`);
-  if (!fs7.existsSync(filePath)) return null;
-  const payload = fs7.readFileSync(filePath);
+  const filePath = path15.join(VAULT_DIR, `${docId}.enc`);
+  if (!fs8.existsSync(filePath)) return null;
+  const payload = fs8.readFileSync(filePath);
   if (payload.length < 28) return null;
   const iv = payload.subarray(0, 12);
   const authTag = payload.subarray(12, 28);
   const encrypted = payload.subarray(28);
   const key = ensureVaultKey();
-  const decipher = crypto6.createDecipheriv("aes-256-gcm", key, iv);
+  const decipher = crypto7.createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(encrypted), decipher.final()]);
 }
 function removeVaultFile(docId) {
-  const filePath = path14.join(VAULT_DIR, `${docId}.enc`);
-  if (fs7.existsSync(filePath)) {
-    fs7.unlinkSync(filePath);
+  const filePath = path15.join(VAULT_DIR, `${docId}.enc`);
+  if (fs8.existsSync(filePath)) {
+    fs8.unlinkSync(filePath);
   }
 }
 function validateDocumentMagicBytes(buffer, ext) {
@@ -13922,13 +15514,13 @@ async function extractSearchableText(buffer, ext) {
 }
 var lockerStorage = new ModuleStorage(
   "locker",
-  DB_PATH4,
+  DB_PATH5,
   () => ({ documents: [], folders: [], reminders: [], activity: [], recentSearchesByUser: {}, admissionDocAttachments: {} })
 );
-function loadDb9() {
+function loadDb10() {
   return lockerStorage.get();
 }
-function saveDb9(db) {
+function saveDb10(db) {
   lockerStorage.saveSync(db);
 }
 function recordActivity(db, ownerId, action, targetType, targetId, targetName, details) {
@@ -13966,8 +15558,8 @@ function readCrossModuleData(db, userId) {
   let careerResumes = [];
   let admissions = [];
   try {
-    if (fs7.existsSync(KAMPUS_ID_DB_PATH)) {
-      const kdb = JSON.parse(fs7.readFileSync(KAMPUS_ID_DB_PATH, "utf8"));
+    if (fs8.existsSync(KAMPUS_ID_DB_PATH)) {
+      const kdb = JSON.parse(fs8.readFileSync(KAMPUS_ID_DB_PATH, "utf8"));
       const rec = Array.isArray(kdb.identities) ? kdb.identities.find((i) => i.userId === userId) : null;
       if (rec) {
         kampusId = {
@@ -13980,8 +15572,8 @@ function readCrossModuleData(db, userId) {
   } catch {
   }
   try {
-    if (fs7.existsSync(CAREER_DB_PATH)) {
-      const cdb = JSON.parse(fs7.readFileSync(CAREER_DB_PATH, "utf8"));
+    if (fs8.existsSync(CAREER_DB_PATH2)) {
+      const cdb = JSON.parse(fs8.readFileSync(CAREER_DB_PATH2, "utf8"));
       const resumes = Array.isArray(cdb.resumes) ? cdb.resumes.filter((r) => r.userId === userId) : [];
       careerResumes = resumes.map(
         (r) => ({
@@ -13996,8 +15588,8 @@ function readCrossModuleData(db, userId) {
   } catch {
   }
   try {
-    if (fs7.existsSync(COLLEGE_DB_PATH)) {
-      const cedb = JSON.parse(fs7.readFileSync(COLLEGE_DB_PATH, "utf8"));
+    if (fs8.existsSync(COLLEGE_DB_PATH2)) {
+      const cedb = JSON.parse(fs8.readFileSync(COLLEGE_DB_PATH2, "utf8"));
       const userAdms = Array.isArray(cedb.admissions) ? cedb.admissions.filter((a) => a.userId === userId) : [];
       admissions = userAdms.map(
         (a) => ({
@@ -14026,7 +15618,7 @@ function canUserAccessDoc(doc, userId, requiredPermission = "view") {
   return true;
 }
 function registerLockerBackend(app) {
-  const db = loadDb9();
+  const db = loadDb10();
   app.post("/api/locker/bootstrap", (req, res) => {
     const userId = String(req.body?.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "Authenticated userId is required." });
@@ -14063,7 +15655,7 @@ function registerLockerBackend(app) {
       if (!ownerId || !fileName || !base64Data) {
         return res.status(400).json({ message: "ownerId, fileName, and file content are required." });
       }
-      const ext = path14.extname(fileName).toLowerCase();
+      const ext = path15.extname(fileName).toLowerCase();
       const formatInfo = MIME_BY_EXT[ext];
       if (!formatInfo) {
         return res.status(400).json({
@@ -14090,8 +15682,8 @@ function registerLockerBackend(app) {
           return res.status(403).json({ message: "403 Forbidden: Target folder not accessible." });
         }
       }
-      const docId = `ldc_${Date.now()}_${crypto6.randomBytes(4).toString("hex")}`;
-      const sha256Checksum = crypto6.createHash("sha256").update(buffer).digest("hex");
+      const docId = `ldc_${Date.now()}_${crypto7.randomBytes(4).toString("hex")}`;
+      const sha256Checksum = crypto7.createHash("sha256").update(buffer).digest("hex");
       encryptAndStoreFile(docId, buffer);
       const searchableText = b.allowContentIndexing === true ? await extractSearchableText(buffer, ext) : void 0;
       const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -14133,7 +15725,7 @@ function registerLockerBackend(app) {
         doc.title,
         `${doc.format} (${buffer.length} bytes) encrypted at rest in ${doc.category}`
       );
-      saveDb9(db);
+      saveDb10(db);
       return res.status(201).json({
         document: doc,
         storage: computeStorageForUser(db, ownerId),
@@ -14169,7 +15761,7 @@ function registerLockerBackend(app) {
       doc.title,
       `${isDownload ? "Downloaded" : "Previewed"} by ${userId === doc.ownerId ? "owner" : userId}`
     );
-    saveDb9(db);
+    saveDb10(db);
     res.setHeader("Content-Type", doc.mimeType);
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader(
@@ -14220,7 +15812,7 @@ function registerLockerBackend(app) {
       detail = `Moved to ${destName}`;
     }
     recordActivity(db, userId, action, "document", doc.id, doc.title, detail);
-    saveDb9(db);
+    saveDb10(db);
     return res.json({
       document: doc,
       activity: db.activity.filter((a) => a.ownerId === userId).slice(0, 80)
@@ -14248,7 +15840,7 @@ function registerLockerBackend(app) {
       doc.title,
       "Permanently deleted file from encrypted vault"
     );
-    saveDb9(db);
+    saveDb10(db);
     return res.json({
       deletedId: doc.id,
       storage: computeStorageForUser(db, userId),
@@ -14281,7 +15873,7 @@ function registerLockerBackend(app) {
     };
     db.folders.push(folder);
     recordActivity(db, ownerId, "Uploaded", "folder", folder.id, folder.name, "Created smart folder");
-    saveDb9(db);
+    saveDb10(db);
     return res.status(201).json({
       folder,
       storage: computeStorageForUser(db, ownerId),
@@ -14311,7 +15903,7 @@ function registerLockerBackend(app) {
       folder.name,
       `Renamed folder from "${prevName}" to "${folder.name}"`
     );
-    saveDb9(db);
+    saveDb10(db);
     return res.json({
       folder,
       activity: db.activity.filter((a) => a.ownerId === userId).slice(0, 80)
@@ -14344,7 +15936,7 @@ function registerLockerBackend(app) {
       folder.name,
       "Deleted folder (documents safely preserved in parent folder)"
     );
-    saveDb9(db);
+    saveDb10(db);
     return res.json({
       deletedFolderId: folder.id,
       folders: db.folders.filter((f) => f.ownerId === userId),
@@ -14396,7 +15988,7 @@ function registerLockerBackend(app) {
       doc.title,
       `Shared (${permission}) with ${targetUserName}`
     );
-    saveDb9(db);
+    saveDb10(db);
     return res.status(201).json({
       document: doc,
       activity: db.activity.filter((a) => a.ownerId === userId).slice(0, 80)
@@ -14412,7 +16004,7 @@ function registerLockerBackend(app) {
     }
     const hours = Math.min(720, Math.max(1, Number(b.expiresInHours) || 24));
     const permission = b.permission === "download" ? "download" : "view";
-    const token = `kmp_shr_${crypto6.randomBytes(18).toString("hex")}`;
+    const token = `kmp_shr_${crypto7.randomBytes(18).toString("hex")}`;
     const expiresAt = new Date(Date.now() + hours * 36e5).toISOString();
     const shareLink = {
       id: `lsl_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -14434,7 +16026,7 @@ function registerLockerBackend(app) {
       doc.title,
       `Created signed share link (${hours}h \xB7 ${permission})`
     );
-    saveDb9(db);
+    saveDb10(db);
     return res.status(201).json({
       shareLink,
       document: doc,
@@ -14468,7 +16060,7 @@ function registerLockerBackend(app) {
       return res.status(400).json({ message: "Specify shareUserId or shareLinkId to revoke." });
     }
     recordActivity(db, userId, "Sharing Revoked", "share", doc.id, doc.title, revokedDesc);
-    saveDb9(db);
+    saveDb10(db);
     return res.json({
       document: doc,
       activity: db.activity.filter((a) => a.ownerId === userId).slice(0, 80)
@@ -14500,7 +16092,7 @@ function registerLockerBackend(app) {
         doc.title,
         `Signed share link "${link.label}" opened by ${viewerUserId}`
       );
-      saveDb9(db);
+      saveDb10(db);
       return res.json({
         document: {
           id: doc.id,
@@ -14573,7 +16165,7 @@ function registerLockerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.reminders.unshift(rem);
-    saveDb9(db);
+    saveDb10(db);
     return res.status(201).json({ reminder: rem });
   });
   app.patch("/api/locker/reminders/:id", (req, res) => {
@@ -14584,7 +16176,7 @@ function registerLockerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     if (typeof b.completed === "boolean") rem.completed = b.completed;
-    saveDb9(db);
+    saveDb10(db);
     return res.json({ reminder: rem });
   });
   app.delete("/api/locker/reminders/:id", (req, res) => {
@@ -14594,7 +16186,7 @@ function registerLockerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.reminders = db.reminders.filter((r) => r.id !== rem.id);
-    saveDb9(db);
+    saveDb10(db);
     return res.json({ deletedId: rem.id });
   });
   app.post("/api/locker/recent-searches", (req, res) => {
@@ -14602,7 +16194,7 @@ function registerLockerBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (clear) {
       db.recentSearchesByUser[userId] = [];
-      saveDb9(db);
+      saveDb10(db);
       return res.json({ recentSearches: [] });
     }
     const trimmed = String(query2 || "").trim();
@@ -14611,7 +16203,7 @@ function registerLockerBackend(app) {
       (q) => q.toLowerCase() !== trimmed.toLowerCase()
     );
     db.recentSearchesByUser[userId] = [trimmed, ...prev].slice(0, 6);
-    saveDb9(db);
+    saveDb10(db);
     return res.json({ recentSearches: db.recentSearchesByUser[userId] });
   });
   app.post("/api/locker/integrations/attach-admission-doc", (req, res) => {
@@ -14627,22 +16219,22 @@ function registerLockerBackend(app) {
     } else if (!prev.includes(documentId)) {
       db.admissionDocAttachments[admissionId] = [...prev, documentId];
     }
-    saveDb9(db);
+    saveDb10(db);
     return res.json({ crossModule: readCrossModuleData(db, userId) });
   });
 }
 
 // server/rewardsBackend.ts
-import crypto7 from "crypto";
-import fs8 from "fs";
-import path15 from "path";
-var DB_PATH5 = path15.join(process.cwd(), ".kampus_rewards_db.json");
+import crypto8 from "crypto";
+import fs9 from "fs";
+import path16 from "path";
+var DB_PATH6 = path16.join(process.cwd(), ".kampus_rewards_db.json");
 var REWARDS_ADMIN_PASSKEY = "KMP-REWARDS-ADMIN-2026";
-var STUDY_DB_PATH = path15.join(process.cwd(), ".kampus_study_rooms_db.json");
-var EVENTS_DB_PATH = path15.join(process.cwd(), ".kampus_events_clubs_db.json");
-var CAREER_DB_PATH2 = path15.join(process.cwd(), ".kampus_career_db.json");
-var VOICE_DB_PATH = path15.join(process.cwd(), ".kampus_student_voice_db.json");
-var LOCKER_DB_PATH = path15.join(process.cwd(), ".kampus_locker_db.json");
+var STUDY_DB_PATH = path16.join(process.cwd(), ".kampus_study_rooms_db.json");
+var EVENTS_DB_PATH2 = path16.join(process.cwd(), ".kampus_events_clubs_db.json");
+var CAREER_DB_PATH3 = path16.join(process.cwd(), ".kampus_career_db.json");
+var VOICE_DB_PATH = path16.join(process.cwd(), ".kampus_student_voice_db.json");
+var LOCKER_DB_PATH2 = path16.join(process.cwd(), ".kampus_locker_db.json");
 function addDaysISO5(days) {
   const d = /* @__PURE__ */ new Date();
   d.setDate(d.getDate() + days);
@@ -14950,18 +16542,18 @@ function createSeedDatabase10() {
 }
 var rewardsStorage = new ModuleStorage(
   "rewards",
-  DB_PATH5,
+  DB_PATH6,
   () => createSeedDatabase10()
 );
-function loadDb10() {
+function loadDb11() {
   return rewardsStorage.get();
 }
-function saveDb10(db) {
+function saveDb11(db) {
   rewardsStorage.saveSync(db);
 }
 function ensureWallet(db, userId, userName, college) {
   if (!db.wallets[userId]) {
-    const shortHash = crypto7.createHash("sha256").update(userId).digest("hex").slice(0, 6).toUpperCase();
+    const shortHash = crypto8.createHash("sha256").update(userId).digest("hex").slice(0, 6).toUpperCase();
     db.wallets[userId] = {
       userId,
       userName: userName || "KAMPUS Student",
@@ -14991,8 +16583,8 @@ function getLevelForPoints(levels, totalEarned) {
 }
 function readJsonSafe(filePath) {
   try {
-    if (fs8.existsSync(filePath)) {
-      return JSON.parse(fs8.readFileSync(filePath, "utf8"));
+    if (fs9.existsSync(filePath)) {
+      return JSON.parse(fs9.readFileSync(filePath, "utf8"));
     }
   } catch {
   }
@@ -15024,7 +16616,7 @@ function readVerifiedEcosystemForUser(userId) {
       }
     }
   }
-  const evtDb = readJsonSafe(EVENTS_DB_PATH);
+  const evtDb = readJsonSafe(EVENTS_DB_PATH2);
   if (evtDb) {
     if (Array.isArray(evtDb.registrations)) {
       for (const reg of evtDb.registrations) {
@@ -15045,7 +16637,7 @@ function readVerifiedEcosystemForUser(userId) {
       ).length;
     }
   }
-  const carDb = readJsonSafe(CAREER_DB_PATH2);
+  const carDb = readJsonSafe(CAREER_DB_PATH3);
   if (carDb) {
     if (Array.isArray(carDb.assessmentAttempts)) {
       for (const att of carDb.assessmentAttempts) {
@@ -15083,12 +16675,12 @@ function readVerifiedEcosystemForUser(userId) {
     }
     if (Array.isArray(voiceDb.pollResponses)) {
       voicePollsVoted = voiceDb.pollResponses.filter((p) => {
-        const expected = crypto7.createHash("sha256").update(`${userId}::${p.pollId || ""}::kampus_voice`).digest("hex").slice(0, 24);
+        const expected = crypto8.createHash("sha256").update(`${userId}::${p.pollId || ""}::kampus_voice`).digest("hex").slice(0, 24);
         return p.userHash === expected;
       }).length;
     }
   }
-  const lockerDb = readJsonSafe(LOCKER_DB_PATH);
+  const lockerDb = readJsonSafe(LOCKER_DB_PATH2);
   if (lockerDb && Array.isArray(lockerDb.documents)) {
     for (const d of lockerDb.documents) {
       if (d.ownerId === userId) {
@@ -15147,7 +16739,7 @@ function syncVerifiedActivityForUser(db, userId) {
     ).length;
     if (todayRuleCount >= rule.dailyLimit) continue;
     const tx = {
-      id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       userId,
       activityName: rule.actionName,
       module: rule.module,
@@ -15243,14 +16835,14 @@ function computeAnalytics2(db) {
 }
 var activeRedemptionLocks = /* @__PURE__ */ new Set();
 function registerRewardsBackend(app) {
-  const db = loadDb10();
+  const db = loadDb11();
   app.post("/api/rewards/bootstrap", (req, res) => {
     const b = req.body || {};
     const userId = String(b.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "userId is required." });
     const wallet = ensureWallet(db, userId, b.userName, b.college);
     const { newTransactions, newlyUnlockedBadges } = syncVerifiedActivityForUser(db, userId);
-    saveDb10(db);
+    saveDb11(db);
     const roleInfo = db.roleOverrides[userId] || { role: "Student", label: null };
     const isAdmin = roleInfo.role === "Rewards Admin";
     const currentLevel = getLevelForPoints(db.levels, wallet.totalEarned);
@@ -15285,7 +16877,7 @@ function registerRewardsBackend(app) {
     if (!userId) return res.status(400).json({ message: "userId is required." });
     if (revert) {
       delete db.roleOverrides[userId];
-      saveDb10(db);
+      saveDb11(db);
       return res.json({ roleInfo: { role: "Student", label: null } });
     }
     if (passkey !== REWARDS_ADMIN_PASSKEY) {
@@ -15295,7 +16887,7 @@ function registerRewardsBackend(app) {
       role: "Rewards Admin",
       label: "Campus Rewards & Engagement Administrator"
     };
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ roleInfo: db.roleOverrides[userId] });
   });
   app.get("/api/rewards/leaderboard", (req, res) => {
@@ -15308,7 +16900,7 @@ function registerRewardsBackend(app) {
     const wallet = ensureWallet(db, userId);
     wallet.showOnLeaderboard = Boolean(showOnLeaderboard);
     wallet.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ wallet, leaderboard: buildLeaderboard(db, "All Time") });
   });
   app.post("/api/rewards/challenges/:id/join", (req, res) => {
@@ -15329,7 +16921,7 @@ function registerRewardsBackend(app) {
       getMetricValue(snap, db, userId, challenge.metricKey)
     );
     const part = {
-      id: `chp_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `chp_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       userId,
       challengeId: challenge.id,
       joinedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -15337,7 +16929,7 @@ function registerRewardsBackend(app) {
       claimed: false
     };
     db.challengeParticipations.push(part);
-    saveDb10(db);
+    saveDb11(db);
     return res.status(201).json({ participation: part });
   });
   app.post("/api/rewards/challenges/:id/claim", (req, res) => {
@@ -15361,7 +16953,7 @@ function registerRewardsBackend(app) {
     part.claimed = true;
     part.claimedAt = (/* @__PURE__ */ new Date()).toISOString();
     const tx = {
-      id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       userId,
       activityName: `Challenge Completed: ${challenge.name}`,
       module: "Challenge",
@@ -15377,7 +16969,7 @@ function registerRewardsBackend(app) {
     wallet.totalEarned += challenge.rewardPoints;
     wallet.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     syncVerifiedActivityForUser(db, userId);
-    saveDb10(db);
+    saveDb11(db);
     return res.json({
       participation: part,
       transaction: tx,
@@ -15432,7 +17024,7 @@ function registerRewardsBackend(app) {
         wallet.activeDigitalTheme = "navy-honours";
       }
       const tx = {
-        id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+        id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
         userId,
         activityName: `Redeemed: ${item.name}`,
         module: "Rewards Store",
@@ -15445,7 +17037,7 @@ function registerRewardsBackend(app) {
       db.transactions.unshift(tx);
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const record = {
-        id: `rrd_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+        id: `rrd_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
         idempotencyKey,
         userId,
         userName: wallet.userName,
@@ -15454,14 +17046,14 @@ function registerRewardsBackend(app) {
         category: item.category,
         pointsSpent: item.requiredPoints,
         status,
-        couponCode: item.isPartnerOffer && item.partnerName ? `VERIFIED-${crypto7.randomBytes(3).toString("hex").toUpperCase()}` : null,
+        couponCode: item.isPartnerOffer && item.partnerName ? `VERIFIED-${crypto8.randomBytes(3).toString("hex").toUpperCase()}` : null,
         couponValidity: item.isPartnerOffer ? addDaysISO5(30) : null,
         usageInstructions: item.digitalContent?.instructions,
         createdAt: now,
         updatedAt: now
       };
       db.redemptions.unshift(record);
-      saveDb10(db);
+      saveDb11(db);
       return res.status(201).json({
         redemption: record,
         transaction: tx,
@@ -15491,7 +17083,7 @@ function registerRewardsBackend(app) {
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const rec = {
-      id: `rrf_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `rrf_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       referrerUserId,
       referrerName: wallet.userName,
       referredIdentifier,
@@ -15502,7 +17094,7 @@ function registerRewardsBackend(app) {
       updatedAt: now
     };
     db.referrals.unshift(rec);
-    saveDb10(db);
+    saveDb11(db);
     return res.status(201).json({ referral: rec });
   });
   const requireRewardsAdmin = (userId, res) => {
@@ -15532,7 +17124,7 @@ function registerRewardsBackend(app) {
       details: `${rule.actionName} set to ${rule.points} K-Points (daily limit ${rule.dailyLimit})`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ rule, rules: db.rules, auditLogs: db.auditLogs });
   });
   app.patch("/api/rewards/admin/levels/:num", (req, res) => {
@@ -15553,7 +17145,7 @@ function registerRewardsBackend(app) {
       details: `Level ${lvl.levelNumber} (${lvl.name}) threshold -> ${lvl.minPoints} pts`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ levels: db.levels, auditLogs: db.auditLogs });
   });
   app.post("/api/rewards/admin/catalog", (req, res) => {
@@ -15564,7 +17156,7 @@ function registerRewardsBackend(app) {
       return res.status(400).json({ message: "Valid reward name and positive point cost required." });
     }
     const item = {
-      id: `rw_${Date.now()}_${crypto7.randomBytes(2).toString("hex")}`,
+      id: `rw_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
       name: String(b.name).trim(),
       category: b.category || "Campus Rewards",
       description: String(b.description || "").trim(),
@@ -15586,7 +17178,7 @@ function registerRewardsBackend(app) {
       details: `Added "${item.name}" (${item.requiredPoints} K-Points)`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.status(201).json({ item, catalog: db.catalog, auditLogs: db.auditLogs });
   });
   app.post("/api/rewards/admin/challenges", (req, res) => {
@@ -15597,7 +17189,7 @@ function registerRewardsBackend(app) {
       return res.status(400).json({ message: "Challenge name and reward points required." });
     }
     const ch = {
-      id: `chl_${Date.now()}_${crypto7.randomBytes(2).toString("hex")}`,
+      id: `chl_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
       cadence: b.cadence === "Daily" ? "Daily" : "Weekly",
       name: String(b.name).trim(),
       description: String(b.description || "").trim(),
@@ -15608,7 +17200,7 @@ function registerRewardsBackend(app) {
       active: true
     };
     db.challenges.unshift(ch);
-    saveDb10(db);
+    saveDb11(db);
     return res.status(201).json({ challenge: ch, challenges: db.challenges });
   });
   app.post("/api/rewards/admin/adjust", (req, res) => {
@@ -15631,7 +17223,7 @@ function registerRewardsBackend(app) {
     if (delta > 0) wallet.totalEarned += delta;
     wallet.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     const tx = {
-      id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       userId: targetUserId,
       activityName: "Admin Audited Adjustment",
       module: "Admin Adjustment",
@@ -15652,7 +17244,7 @@ function registerRewardsBackend(app) {
       details: `${delta > 0 ? "+" : ""}${delta} K-Points for ${targetUserId}`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.status(201).json({
       transaction: tx,
       wallet,
@@ -15682,7 +17274,7 @@ function registerRewardsBackend(app) {
     if (orig.points > 0) wallet.totalEarned = Math.max(0, wallet.totalEarned - orig.points);
     if (orig.points < 0) wallet.totalRedeemed = Math.max(0, wallet.totalRedeemed + orig.points);
     const revTx = {
-      id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+      id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
       userId: orig.userId,
       activityName: `Reversal: ${orig.activityName}`,
       module: "Admin Adjustment",
@@ -15704,7 +17296,7 @@ function registerRewardsBackend(app) {
       details: `Reversed ${orig.id} (${orig.points} K-Points)`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.json({
       reversed: revTx,
       auditLogs: db.auditLogs,
@@ -15736,7 +17328,7 @@ function registerRewardsBackend(app) {
       details: `${rec.rewardName} (${rec.id})`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ redemption: rec, auditLogs: db.auditLogs });
   });
   app.patch("/api/rewards/admin/referrals/:id", (req, res) => {
@@ -15757,7 +17349,7 @@ function registerRewardsBackend(app) {
       wallet.availableBalance += bonus;
       wallet.totalEarned += bonus;
       db.transactions.unshift({
-        id: `ktx_${Date.now()}_${crypto7.randomBytes(3).toString("hex")}`,
+        id: `ktx_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
         userId: ref.referrerUserId,
         activityName: "Verified Peer Referral Bonus",
         module: "Referral",
@@ -15769,22 +17361,22 @@ function registerRewardsBackend(app) {
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    saveDb10(db);
+    saveDb11(db);
     return res.json({ referral: ref, auditLogs: db.auditLogs });
   });
 }
 
 // server/plannerBackend.ts
-import crypto8 from "crypto";
-import fs9 from "fs";
-import path16 from "path";
-var DB_PATH6 = path16.join(process.cwd(), ".kampus_planner_db.json");
-var CAREER_DB_PATH3 = path16.join(process.cwd(), ".kampus_career_db.json");
-var EVENTS_DB_PATH2 = path16.join(process.cwd(), ".kampus_events_clubs_db.json");
-var COLLEGE_DB_PATH2 = path16.join(process.cwd(), ".kampus_college_explorer_db.json");
-var LOCKER_DB_PATH2 = path16.join(process.cwd(), ".kampus_locker_db.json");
-var STUDY_ROOMS_DB_PATH = path16.join(process.cwd(), ".kampus_study_rooms_db.json");
-function createEmptyDb() {
+import crypto9 from "crypto";
+import fs10 from "fs";
+import path17 from "path";
+var DB_PATH7 = path17.join(process.cwd(), ".kampus_planner_db.json");
+var CAREER_DB_PATH4 = path17.join(process.cwd(), ".kampus_career_db.json");
+var EVENTS_DB_PATH3 = path17.join(process.cwd(), ".kampus_events_clubs_db.json");
+var COLLEGE_DB_PATH3 = path17.join(process.cwd(), ".kampus_college_explorer_db.json");
+var LOCKER_DB_PATH3 = path17.join(process.cwd(), ".kampus_locker_db.json");
+var STUDY_ROOMS_DB_PATH = path17.join(process.cwd(), ".kampus_study_rooms_db.json");
+function createEmptyDb2() {
   return {
     tasks: [],
     events: [],
@@ -15800,13 +17392,13 @@ function createEmptyDb() {
 }
 var plannerStorage = new ModuleStorage(
   "planner",
-  DB_PATH6,
-  () => createEmptyDb()
+  DB_PATH7,
+  () => createEmptyDb2()
 );
-function loadDb11() {
+function loadDb12() {
   return plannerStorage.get();
 }
-function saveDb11(db) {
+function saveDb12(db) {
   plannerStorage.saveSync(db);
 }
 function addDaysToISODate(baseISO, days) {
@@ -15828,8 +17420,8 @@ function computeNextRecurrenceDate(currentISO, recurrence, customDays) {
 }
 function readJsonSafe2(filePath) {
   try {
-    if (fs9.existsSync(filePath)) {
-      return JSON.parse(fs9.readFileSync(filePath, "utf8"));
+    if (fs10.existsSync(filePath)) {
+      return JSON.parse(fs10.readFileSync(filePath, "utf8"));
     }
   } catch {
   }
@@ -15837,7 +17429,7 @@ function readJsonSafe2(filePath) {
 }
 function readUserIntegrations(userId) {
   const items = [];
-  const careerDb = readJsonSafe2(CAREER_DB_PATH3);
+  const careerDb = readJsonSafe2(CAREER_DB_PATH4);
   if (careerDb && Array.isArray(careerDb.applications)) {
     for (const appItem of careerDb.applications) {
       if (appItem.userId !== userId) continue;
@@ -15853,7 +17445,7 @@ function readUserIntegrations(userId) {
       });
     }
   }
-  const eventsDb = readJsonSafe2(EVENTS_DB_PATH2);
+  const eventsDb = readJsonSafe2(EVENTS_DB_PATH3);
   if (eventsDb && Array.isArray(eventsDb.registrations)) {
     const eventsList = Array.isArray(eventsDb.events) ? eventsDb.events : [];
     for (const reg of eventsDb.registrations) {
@@ -15871,7 +17463,7 @@ function readUserIntegrations(userId) {
       });
     }
   }
-  const collegeDb = readJsonSafe2(COLLEGE_DB_PATH2);
+  const collegeDb = readJsonSafe2(COLLEGE_DB_PATH3);
   if (collegeDb) {
     const savedMap = collegeDb.savedCollegesByUser || {};
     const savedIds = savedMap[userId] || [];
@@ -15891,7 +17483,7 @@ function readUserIntegrations(userId) {
       });
     }
   }
-  const lockerDb = readJsonSafe2(LOCKER_DB_PATH2);
+  const lockerDb = readJsonSafe2(LOCKER_DB_PATH3);
   if (lockerDb && Array.isArray(lockerDb.reminders)) {
     for (const rem of lockerDb.reminders) {
       if (rem.ownerId !== userId || rem.completed) continue;
@@ -15929,7 +17521,7 @@ function readUserIntegrations(userId) {
   return items;
 }
 function registerPlannerBackend(app) {
-  const db = loadDb11();
+  const db = loadDb12();
   app.post("/api/planner/bootstrap", (req, res) => {
     const userId = String(req.body?.userId || "").trim();
     if (!userId) return res.status(400).json({ message: "userId is required." });
@@ -15961,7 +17553,7 @@ function registerPlannerBackend(app) {
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const task = {
-      id: `ptk_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `ptk_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       title,
       description: String(b.description || "").trim(),
@@ -15987,7 +17579,7 @@ function registerPlannerBackend(app) {
       completedAt: b.status === "Completed" ? now : null
     };
     db.tasks.unshift(task);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ task });
   });
   app.patch("/api/planner/tasks/:id", (req, res) => {
@@ -16032,7 +17624,7 @@ function registerPlannerBackend(app) {
       if (nextDate) {
         nextRecurringTask = {
           ...task,
-          id: `ptk_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+          id: `ptk_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
           status: "To Do",
           dueDateISO: nextDate,
           reminderState: "Active",
@@ -16045,7 +17637,7 @@ function registerPlannerBackend(app) {
         db.tasks.unshift(nextRecurringTask);
       }
     }
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ task, nextRecurringTask });
   });
   app.post("/api/planner/tasks/:id/duplicate", (req, res) => {
@@ -16057,18 +17649,18 @@ function registerPlannerBackend(app) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const copy = {
       ...orig,
-      id: `ptk_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `ptk_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       title: `${orig.title} (Copy)`,
       status: "To Do",
       reminderState: "Active",
       snoozedUntilISO: null,
-      subtasks: orig.subtasks.map((s) => ({ ...s, id: `sub_${crypto8.randomBytes(2).toString("hex")}`, completed: false })),
+      subtasks: orig.subtasks.map((s) => ({ ...s, id: `sub_${crypto9.randomBytes(2).toString("hex")}`, completed: false })),
       createdAt: now,
       updatedAt: now,
       completedAt: null
     };
     db.tasks.unshift(copy);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ task: copy });
   });
   app.delete("/api/planner/tasks/:id", (req, res) => {
@@ -16078,7 +17670,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.tasks.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/events", (req, res) => {
@@ -16088,7 +17680,7 @@ function registerPlannerBackend(app) {
     if (!userId || !title) return res.status(400).json({ message: "userId and title required." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const evt = {
-      id: `pevt_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pevt_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       title,
       dateISO: String(b.dateISO || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)),
@@ -16107,7 +17699,7 @@ function registerPlannerBackend(app) {
       updatedAt: now
     };
     db.events.unshift(evt);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ event: evt });
   });
   app.patch("/api/planner/events/:id", (req, res) => {
@@ -16130,7 +17722,7 @@ function registerPlannerBackend(app) {
     if (typeof b.description === "string") evt.description = b.description.trim();
     if (typeof b.completed === "boolean") evt.completed = b.completed;
     evt.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ event: evt });
   });
   app.delete("/api/planner/events/:id", (req, res) => {
@@ -16140,7 +17732,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.events.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/study-plans", (req, res) => {
@@ -16150,7 +17742,7 @@ function registerPlannerBackend(app) {
     if (!userId || !subject) return res.status(400).json({ message: "userId and subject required." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const plan = {
-      id: `pspl_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pspl_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       courseOrClass: String(b.courseOrClass || "Current Semester").trim(),
       subject,
@@ -16161,7 +17753,7 @@ function registerPlannerBackend(app) {
       updatedAt: now
     };
     db.studyPlans.unshift(plan);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ studyPlan: plan });
   });
   app.patch("/api/planner/study-plans/:id", (req, res) => {
@@ -16176,7 +17768,7 @@ function registerPlannerBackend(app) {
     if (typeof b.targetDateISO === "string") plan.targetDateISO = b.targetDateISO;
     if (Array.isArray(b.chapters)) plan.chapters = b.chapters;
     plan.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ studyPlan: plan });
   });
   app.delete("/api/planner/study-plans/:id", (req, res) => {
@@ -16186,7 +17778,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.studyPlans.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/study-sessions", (req, res) => {
@@ -16196,7 +17788,7 @@ function registerPlannerBackend(app) {
     if (!userId || !subject) return res.status(400).json({ message: "Subject is required." });
     const status = b.status || "Planned";
     const session = {
-      id: `pssn_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pssn_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       studyPlanId: b.studyPlanId || null,
       subject,
@@ -16210,7 +17802,7 @@ function registerPlannerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.studySessions.unshift(session);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ studySession: session });
   });
   app.patch("/api/planner/study-sessions/:id", (req, res) => {
@@ -16229,7 +17821,7 @@ function registerPlannerBackend(app) {
     } else if (ssn.status === "Completed" && ssn.actualMinutes === 0) {
       ssn.actualMinutes = ssn.plannedMinutes;
     }
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ studySession: ssn });
   });
   app.delete("/api/planner/study-sessions/:id", (req, res) => {
@@ -16239,7 +17831,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.studySessions.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/timetable", (req, res) => {
@@ -16248,7 +17840,7 @@ function registerPlannerBackend(app) {
     const subject = String(b.subject || "").trim();
     if (!userId || !subject) return res.status(400).json({ message: "Subject required." });
     const slot = {
-      id: `pttb_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pttb_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       dayOfWeek: b.dayOfWeek || "Mon",
       startTime: String(b.startTime || "09:00"),
@@ -16259,7 +17851,7 @@ function registerPlannerBackend(app) {
       instructor: String(b.instructor || "").trim()
     };
     db.timetable.push(slot);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ slot });
   });
   app.post("/api/planner/timetable/duplicate", (req, res) => {
@@ -16270,11 +17862,11 @@ function registerPlannerBackend(app) {
     const sourceSlots = db.timetable.filter((s) => s.userId === userId && s.dayOfWeek === fromDay);
     const createdSlots = sourceSlots.map((s) => ({
       ...s,
-      id: `pttb_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
+      id: `pttb_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
       dayOfWeek: toDay
     }));
     db.timetable.push(...createdSlots);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ createdSlots });
   });
   app.delete("/api/planner/timetable/:id", (req, res) => {
@@ -16284,7 +17876,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.timetable.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/goals", (req, res) => {
@@ -16297,7 +17889,7 @@ function registerPlannerBackend(app) {
     const progressPct = milestones.length > 0 ? Math.round(done / milestones.length * 100) : 0;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const goal = {
-      id: `pgl_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pgl_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       category: b.category || "Academic Goals",
       title,
@@ -16311,7 +17903,7 @@ function registerPlannerBackend(app) {
       updatedAt: now
     };
     db.goals.unshift(goal);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ goal });
   });
   app.patch("/api/planner/goals/:id", (req, res) => {
@@ -16335,7 +17927,7 @@ function registerPlannerBackend(app) {
       goal.progressPct = Math.max(0, Math.min(100, b.progressPct));
     }
     goal.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ goal });
   });
   app.delete("/api/planner/goals/:id", (req, res) => {
@@ -16345,7 +17937,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.goals.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/habits", (req, res) => {
@@ -16354,7 +17946,7 @@ function registerPlannerBackend(app) {
     const name = String(b.name || "").trim();
     if (!userId || !name) return res.status(400).json({ message: "Habit name required." });
     const habit = {
-      id: `phb_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `phb_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       name,
       targetNote: String(b.targetNote || "Daily consistency").trim(),
@@ -16362,7 +17954,7 @@ function registerPlannerBackend(app) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.habits.unshift(habit);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ habit });
   });
   app.post("/api/planner/habits/:id/checkin", (req, res) => {
@@ -16378,7 +17970,7 @@ function registerPlannerBackend(app) {
     } else {
       habit.completedDates.push(dateISO);
     }
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ habit });
   });
   app.delete("/api/planner/habits/:id", (req, res) => {
@@ -16388,7 +17980,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.habits.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/exams", (req, res) => {
@@ -16398,7 +17990,7 @@ function registerPlannerBackend(app) {
     if (!userId || !name) return res.status(400).json({ message: "Exam/deadline name required." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const exam = {
-      id: `pexm_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pexm_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       examType: b.examType || "University Examination",
       name,
@@ -16412,7 +18004,7 @@ function registerPlannerBackend(app) {
       updatedAt: now
     };
     db.exams.unshift(exam);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ exam });
   });
   app.patch("/api/planner/exams/:id", (req, res) => {
@@ -16427,7 +18019,7 @@ function registerPlannerBackend(app) {
     if (typeof b.venue === "string") exam.venue = b.venue;
     if (typeof b.dateISO === "string") exam.dateISO = b.dateISO;
     exam.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ exam });
   });
   app.delete("/api/planner/exams/:id", (req, res) => {
@@ -16437,7 +18029,7 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.exams.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
   app.post("/api/planner/focus-sessions", (req, res) => {
@@ -16449,7 +18041,7 @@ function registerPlannerBackend(app) {
     }
     const actualMinutes = Math.max(1, Number(b.actualMinutes || 0));
     const rec = {
-      id: `pfcs_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pfcs_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       mode: b.mode || "Focus",
       presetLabel: String(b.presetLabel || `${b.plannedMinutes || actualMinutes} min Focus`),
@@ -16460,7 +18052,7 @@ function registerPlannerBackend(app) {
       completedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.focusSessions.unshift(rec);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ focusSession: rec });
   });
   app.post("/api/planner/notes", (req, res) => {
@@ -16470,7 +18062,7 @@ function registerPlannerBackend(app) {
     if (!userId || !content) return res.status(400).json({ message: "Note content required." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const note = {
-      id: `pnts_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
+      id: `pnts_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
       userId,
       noteType: b.noteType || "Quick",
       title: String(b.title || content.slice(0, 42)).trim(),
@@ -16481,7 +18073,7 @@ function registerPlannerBackend(app) {
       updatedAt: now
     };
     db.notes.unshift(note);
-    saveDb11(db);
+    saveDb12(db);
     return res.status(201).json({ note });
   });
   app.patch("/api/planner/notes/:id", (req, res) => {
@@ -16496,7 +18088,7 @@ function registerPlannerBackend(app) {
     if (typeof b.noteType === "string") note.noteType = b.noteType;
     if (typeof b.pinned === "boolean") note.pinned = b.pinned;
     note.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ note });
   });
   app.delete("/api/planner/notes/:id", (req, res) => {
@@ -16506,1264 +18098,16 @@ function registerPlannerBackend(app) {
       return res.status(403).json({ message: "403 Forbidden." });
     }
     db.notes.splice(idx, 1);
-    saveDb11(db);
+    saveDb12(db);
     return res.json({ deletedId: req.params.id });
   });
-}
-
-// server/notificationsBackend.ts
-import crypto9 from "crypto";
-import fs10 from "fs";
-import path17 from "path";
-import jwt2 from "jsonwebtoken";
-import { WebSocket as WebSocket3, WebSocketServer as WebSocketServer3 } from "ws";
-var DB_PATH7 = path17.join(process.cwd(), ".kampus_notifications_db.json");
-var PUBLISHER_ADMIN_PASSKEY = "KAMPUS_PUBLISHER_2026";
-var PLANNER_DB_PATH = path17.join(process.cwd(), ".kampus_planner_db.json");
-var CAREER_DB_PATH4 = path17.join(process.cwd(), ".kampus_career_db.json");
-var EVENTS_DB_PATH3 = path17.join(process.cwd(), ".kampus_events_clubs_db.json");
-var COLLEGE_DB_PATH3 = path17.join(process.cwd(), ".kampus_college_explorer_db.json");
-var LOCKER_DB_PATH3 = path17.join(process.cwd(), ".kampus_locker_db.json");
-var COMMUNITY_DB_PATH = path17.join(process.cwd(), ".kampus_community_db.json");
-var CHAT_DB_PATH = path17.join(process.cwd(), ".kampus_chat_db.json");
-function createEmptyDb2() {
-  return {
-    notifications: [],
-    preferencesByUser: {},
-    pushSubscriptions: [],
-    announcements: [],
-    reminderOverrides: {},
-    roleOverrides: {}
-  };
-}
-var notificationsStorage = new ModuleStorage(
-  "notifications",
-  DB_PATH7,
-  () => createEmptyDb2()
-);
-function loadDb12() {
-  return notificationsStorage.get();
-}
-function saveDb12(db) {
-  notificationsStorage.saveSync(db);
-}
-function safeReadJson(filePath) {
-  try {
-    if (!fs10.existsSync(filePath)) return null;
-    return JSON.parse(fs10.readFileSync(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-function createDefaultPreferences(userId) {
-  return {
-    userId,
-    modules: {
-      academic: {
-        studyReminders: true,
-        examAlerts: true,
-        assignmentUpdates: true,
-        goalReminders: true
-      },
-      community: {
-        mentions: true,
-        replies: true,
-        comments: true,
-        announcements: true
-      },
-      chat: {
-        directMessages: true,
-        groupMessages: true,
-        messageRequests: true
-      },
-      events: {
-        eventReminders: true,
-        registrationUpdates: true,
-        clubAnnouncements: true
-      },
-      career: {
-        applicationReminders: true,
-        interviewAlerts: true,
-        opportunityUpdates: true
-      },
-      market: {
-        buyerInquiries: true,
-        offers: true,
-        listingUpdates: true
-      },
-      rewards: {
-        pointsUpdates: true,
-        achievementUpdates: true,
-        challengeReminders: true,
-        redemptionUpdates: true
-      },
-      system: {
-        securityAlerts: true,
-        serviceUpdates: true
-      }
-    },
-    channels: {
-      inApp: true,
-      browserPush: false,
-      email: false,
-      sms: false,
-      smsConsent: false
-    },
-    quietHours: {
-      enabled: false,
-      startTime: "22:00",
-      endTime: "07:00",
-      timezone: "Asia/Kolkata"
-    },
-    digest: {
-      enabled: false,
-      frequency: "Daily",
-      categories: ["Academic", "Career", "Events & Clubs"]
-    },
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-function ensurePreferences(db, userId) {
-  if (!db.preferencesByUser[userId]) {
-    db.preferencesByUser[userId] = createDefaultPreferences(userId);
-  }
-  db.preferencesByUser[userId].modules.system.securityAlerts = true;
-  return db.preferencesByUser[userId];
-}
-function getChannelCapabilities() {
-  const emailConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER);
-  const smsConfigured = Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN);
-  return {
-    inApp: { configured: true, statusText: "Active \xB7 WebSocket + Sync" },
-    push: { configured: true, statusText: "Browser Push API Ready (Permission Required)" },
-    email: {
-      configured: emailConfigured,
-      statusText: emailConfigured ? "SMTP Provider Configured" : "Unavailable \xB7 Email Provider Not Configured"
-    },
-    sms: {
-      configured: smsConfigured,
-      statusText: smsConfigured ? "SMS Gateway Configured" : "Unavailable \xB7 SMS Provider Not Configured"
-    }
-  };
-}
-function isWithinQuietHours(quietHours) {
-  if (!quietHours.enabled) return false;
-  try {
-    const formatter = new Intl.DateTimeFormat("en-GB", {
-      timeZone: quietHours.timezone || "UTC",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false
-    });
-    const currentHHMM = formatter.format(/* @__PURE__ */ new Date());
-    const start = quietHours.startTime || "22:00";
-    const end = quietHours.endTime || "07:00";
-    if (start === end) return false;
-    if (start < end) {
-      return currentHHMM >= start && currentHHMM < end;
-    }
-    return currentHHMM >= start || currentHHMM < end;
-  } catch {
-    return false;
-  }
-}
-function assignCategoryAndRules(input) {
-  const text = `${input.title} ${input.description}`.toLowerCase();
-  const route = (input.linkRoute || "").toLowerCase();
-  let category = input.category || "System";
-  let sourceModule = input.sourceModule || "";
-  if (!input.category) {
-    if (route.includes("/chat")) {
-      category = "Chat";
-      sourceModule = sourceModule || "KAMPUS Chat";
-    } else if (route.includes("/community")) {
-      category = "Community";
-      sourceModule = sourceModule || "Student Community";
-    } else if (route.includes("/events")) {
-      category = "Events & Clubs";
-      sourceModule = sourceModule || "Events & Clubs";
-    } else if (route.includes("/career")) {
-      category = "Career";
-      sourceModule = sourceModule || "Career";
-    } else if (route.includes("/college-explorer")) {
-      category = "College Explorer";
-      sourceModule = sourceModule || "College Explorer";
-    } else if (route.includes("/market")) {
-      category = "KAMPUS Market";
-      sourceModule = sourceModule || "KAMPUS Market";
-    } else if (route.includes("/digital-locker")) {
-      category = "Digital Locker";
-      sourceModule = sourceModule || "Digital Locker";
-    } else if (route.includes("/rewards")) {
-      category = "KAMPUS Rewards";
-      sourceModule = sourceModule || "KAMPUS Rewards";
-    } else if (route.includes("/planner")) {
-      category = "Academic";
-      sourceModule = sourceModule || "KAMPUS Planner";
-    } else if (route.includes("/study-hub") || route.includes("/notes") || route.includes("/kampus-ai")) {
-      category = "Academic";
-      sourceModule = sourceModule || "Study Hub";
-    } else if (input.legacyType === "career") {
-      category = "Career";
-      sourceModule = sourceModule || "Career";
-    } else if (input.legacyType === "campus") {
-      category = "Events & Clubs";
-      sourceModule = sourceModule || "Campus";
-    } else if (input.legacyType === "academic" || input.subType === "exam_alert" || input.subType === "assignment" || input.subType === "goal") {
-      category = "Academic";
-      sourceModule = sourceModule || "Academic";
-    } else if (input.subType === "club_announcement") {
-      category = "Events & Clubs";
-      sourceModule = sourceModule || "Events & Clubs";
-    } else {
-      category = "System";
-      sourceModule = sourceModule || "System";
-    }
-  } else {
-    sourceModule = sourceModule || category;
-  }
-  const isMention = Boolean(
-    input.subType === "mention" || text.includes("mentioned you") || text.includes("@")
-  );
-  const isReminder = Boolean(
-    input.subType === "reminder" || text.includes("reminder") || text.includes("due ") || text.includes("deadline") || text.includes("snoozed") || text.includes("scheduled")
-  );
-  const subType = input.subType || (text.includes("security") || text.includes("password") || text.includes("login alert") ? "security_alert" : isMention ? "mention" : isReminder ? "reminder" : "general");
-  let priority = input.priority || "Normal";
-  if (!input.priority) {
-    if (subType === "security_alert" || text.includes("exam rescheduled") || text.includes("exam cancelled") || text.includes("immediate examination") || text.includes("critical deadline")) {
-      priority = "Urgent";
-    } else if (text.includes("interview") || text.includes("assignment deadline") || text.includes("due tomorrow") || text.includes("counteroffer") || text.includes("offer received") || text.includes("admission deadline")) {
-      priority = "High";
-    } else if (text.includes("recommendation") || text.includes("digest") || text.includes("tip")) {
-      priority = "Low";
-    } else {
-      priority = "Normal";
-    }
-  }
-  return { category, sourceModule, subType, priority, isMention, isReminder };
-}
-function isCategoryAllowedByPreferences(prefs, category, subType) {
-  if (category === "System" && subType === "security_alert") {
-    return true;
-  }
-  switch (category) {
-    case "Academic":
-      if (subType === "exam_alert") return prefs.modules.academic.examAlerts;
-      if (subType === "assignment") return prefs.modules.academic.assignmentUpdates;
-      if (subType === "goal") return prefs.modules.academic.goalReminders;
-      return prefs.modules.academic.studyReminders || prefs.modules.academic.examAlerts || prefs.modules.academic.assignmentUpdates || prefs.modules.academic.goalReminders;
-    case "Community":
-      if (subType === "mention") return prefs.modules.community.mentions;
-      if (subType === "reply") return prefs.modules.community.replies;
-      if (subType === "comment") return prefs.modules.community.comments;
-      return prefs.modules.community.mentions || prefs.modules.community.replies || prefs.modules.community.comments || prefs.modules.community.announcements;
-    case "Chat":
-      return prefs.modules.chat.directMessages || prefs.modules.chat.groupMessages || prefs.modules.chat.messageRequests;
-    case "Events & Clubs":
-      return prefs.modules.events.eventReminders || prefs.modules.events.registrationUpdates || prefs.modules.events.clubAnnouncements;
-    case "Career":
-      return prefs.modules.career.applicationReminders || prefs.modules.career.interviewAlerts || prefs.modules.career.opportunityUpdates;
-    case "KAMPUS Market":
-      return prefs.modules.market.buyerInquiries || prefs.modules.market.offers || prefs.modules.market.listingUpdates;
-    case "KAMPUS Rewards":
-      return prefs.modules.rewards.pointsUpdates || prefs.modules.rewards.achievementUpdates || prefs.modules.rewards.challengeReminders || prefs.modules.rewards.redemptionUpdates;
-    case "System":
-      return prefs.modules.system.serviceUpdates;
-    default:
-      return true;
-  }
-}
-function buildDeliveryRecords(db, userId, prefs, allowedByPref, suppressedByQuietHours) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const caps = getChannelCapabilities();
-  const records = [];
-  if (!allowedByPref) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "in_app",
-      status: "Skipped (Preference Disabled)",
-      detail: "Category muted in user notification preferences.",
-      timestamp: now
-    });
-  } else if (suppressedByQuietHours) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "in_app",
-      status: "Held (Quiet Hours)",
-      detail: `Held non-critical alert during quiet hours (${prefs.quietHours.startTime}\u2013${prefs.quietHours.endTime} ${prefs.quietHours.timezone}).`,
-      timestamp: now
-    });
-  } else if (!prefs.channels.inApp) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "in_app",
-      status: "Skipped (Preference Disabled)",
-      detail: "In-app feed delivery disabled by user.",
-      timestamp: now
-    });
-  } else {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "in_app",
-      status: "Delivered",
-      detail: "Delivered to centralized Notification Center inbox.",
-      timestamp: now
-    });
-  }
-  const activeSub = db.pushSubscriptions.find((s) => s.userId === userId && s.active && s.permissionState === "granted");
-  if (prefs.channels.browserPush) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "push",
-      status: suppressedByQuietHours ? "Held (Quiet Hours)" : activeSub ? "Delivered" : "Unavailable (Provider Not Configured)",
-      detail: activeSub ? `Dispatched via active browser subscription (${activeSub.platform}).` : "Browser push permission not granted on this device.",
-      timestamp: now
-    });
-  }
-  if (prefs.channels.email) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "email",
-      status: caps.email.configured ? "Delivered" : "Unavailable (Provider Not Configured)",
-      detail: caps.email.statusText,
-      timestamp: now
-    });
-  }
-  if (prefs.channels.sms) {
-    records.push({
-      id: `del_${crypto9.randomUUID().slice(0, 8)}`,
-      channel: "sms",
-      status: caps.sms.configured && prefs.channels.smsConsent ? "Delivered" : "Unavailable (Provider Not Configured)",
-      detail: !caps.sms.configured ? caps.sms.statusText : "SMS consent missing.",
-      timestamp: now
-    });
-  }
-  return records;
-}
-function buildAggregatedReminders(db, userId) {
-  const reminders = [];
-  const todayISO = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const planner = safeReadJson(PLANNER_DB_PATH);
-  for (const t of planner?.tasks || []) {
-    if (t.userId !== userId || t.status === "Cancelled" || t.reminderState === "Dismissed") continue;
-    let status = "Upcoming";
-    if (t.status === "Completed" || t.reminderState === "Completed") status = "Completed";
-    else if (t.reminderState === "Snoozed") status = "Snoozed";
-    else if (t.dueDateISO < todayISO) status = "Missed";
-    reminders.push({
-      id: `rem_planner_task_${t.id}`,
-      sourceModule: "KAMPUS Planner",
-      sourceItemId: t.id,
-      title: t.title,
-      subtitle: `${t.category} Task`,
-      dueDateISO: t.dueDateISO,
-      dueTime: t.dueTime || "18:00",
-      status,
-      snoozedUntilISO: t.snoozedUntilISO || null,
-      linkRoute: "/tools/planner",
-      priority: t.priority || "Normal"
-    });
-  }
-  for (const x of planner?.exams || []) {
-    if (x.userId !== userId) continue;
-    const key = `${userId}::KAMPUS Planner::exam_${x.id}`;
-    const ov = db.reminderOverrides[key];
-    let status = ov?.status || (x.prepStatus === "Ready" ? "Completed" : x.dateISO < todayISO ? "Missed" : "Upcoming");
-    reminders.push({
-      id: `rem_planner_exam_${x.id}`,
-      sourceModule: "KAMPUS Planner",
-      sourceItemId: `exam_${x.id}`,
-      title: x.name,
-      subtitle: `Exam \xB7 ${x.subject}`,
-      dueDateISO: ov?.rescheduledDateISO || x.dateISO,
-      dueTime: ov?.rescheduledTime || x.time || "09:30",
-      status,
-      snoozedUntilISO: ov?.snoozedUntilISO || null,
-      linkRoute: "/tools/planner",
-      priority: "High"
-    });
-  }
-  const career = safeReadJson(CAREER_DB_PATH4);
-  for (const appItem of career?.applications || []) {
-    if (appItem.userId !== userId) continue;
-    const key = `${userId}::Career::${appItem.id}`;
-    const ov = db.reminderOverrides[key];
-    const dueDate = ov?.rescheduledDateISO || appItem.interviewDateISO || (appItem.appliedAt || todayISO).slice(0, 10);
-    const status = ov?.status || (appItem.status === "Rejected" || appItem.status === "Offer Accepted" ? "Completed" : "Upcoming");
-    reminders.push({
-      id: `rem_career_${appItem.id}`,
-      sourceModule: "Career",
-      sourceItemId: appItem.id,
-      title: `${appItem.opportunityTitle || "Career Application"} (${appItem.status || "Active"})`,
-      subtitle: appItem.companyName || "Career Opportunity",
-      dueDateISO: dueDate,
-      dueTime: ov?.rescheduledTime || "10:00",
-      status,
-      snoozedUntilISO: ov?.snoozedUntilISO || null,
-      linkRoute: "/career",
-      priority: appItem.status === "Interview Scheduled" ? "High" : "Normal"
-    });
-  }
-  const eventsDb = safeReadJson(EVENTS_DB_PATH3);
-  for (const reg of eventsDb?.registrations || []) {
-    if (reg.userId !== userId || reg.status === "Cancelled") continue;
-    const ev = (eventsDb?.events || []).find((e) => e.id === reg.eventId);
-    if (!ev) continue;
-    const key = `${userId}::Events & Clubs::${reg.id}`;
-    const ov = db.reminderOverrides[key];
-    const dueDate = ov?.rescheduledDateISO || ev.dateISO || todayISO;
-    const status = ov?.status || (dueDate < todayISO ? "Completed" : "Upcoming");
-    reminders.push({
-      id: `rem_event_${reg.id}`,
-      sourceModule: "Events & Clubs",
-      sourceItemId: reg.id,
-      title: ev.title,
-      subtitle: "Registered Campus Event",
-      dueDateISO: dueDate,
-      dueTime: ov?.rescheduledTime || ev.timeLabel || "16:00",
-      status,
-      snoozedUntilISO: ov?.snoozedUntilISO || null,
-      linkRoute: "/campus/events-clubs",
-      priority: "Normal"
-    });
-  }
-  const collegeDb = safeReadJson(COLLEGE_DB_PATH3);
-  for (const cr of collegeDb?.reminders || []) {
-    if (cr.userId !== userId) continue;
-    const key = `${userId}::College Explorer::${cr.id}`;
-    const ov = db.reminderOverrides[key];
-    const dueDate = ov?.rescheduledDateISO || cr.deadlineISO || todayISO;
-    const status = ov?.status || (cr.completed ? "Completed" : dueDate < todayISO ? "Missed" : "Upcoming");
-    reminders.push({
-      id: `rem_college_${cr.id}`,
-      sourceModule: "College Explorer",
-      sourceItemId: cr.id,
-      title: cr.title,
-      subtitle: cr.collegeName,
-      dueDateISO: dueDate,
-      dueTime: ov?.rescheduledTime || "17:00",
-      status,
-      snoozedUntilISO: ov?.snoozedUntilISO || null,
-      linkRoute: "/campus/college-explorer",
-      priority: "High"
-    });
-  }
-  const lockerDb = safeReadJson(LOCKER_DB_PATH3);
-  for (const doc of lockerDb?.documents || []) {
-    if (doc.ownerId !== userId || !doc.expiryDate) continue;
-    const key = `${userId}::Digital Locker::${doc.id}`;
-    const ov = db.reminderOverrides[key];
-    const dueDate = ov?.rescheduledDateISO || doc.expiryDate;
-    const status = ov?.status || (dueDate < todayISO ? "Missed" : "Upcoming");
-    reminders.push({
-      id: `rem_locker_${doc.id}`,
-      sourceModule: "Digital Locker",
-      sourceItemId: doc.id,
-      title: `Document Renewal: ${doc.title}`,
-      subtitle: doc.category,
-      dueDateISO: dueDate,
-      dueTime: ov?.rescheduledTime || "12:00",
-      status,
-      snoozedUntilISO: ov?.snoozedUntilISO || null,
-      linkRoute: "/tools/digital-locker",
-      priority: "High"
-    });
-  }
-  return reminders.sort((a, b) => `${a.dueDateISO} ${a.dueTime}`.localeCompare(`${b.dueDateISO} ${b.dueTime}`));
-}
-function buildSocialActivity(db, userId) {
-  const items = [];
-  for (const n of db.notifications) {
-    if (n.userId === userId && !n.deleted && (n.category === "Community" || n.category === "Chat" || n.isMention)) {
-      items.push({
-        id: `soc_notif_${n.id}`,
-        kind: n.isMention ? "mention" : n.category === "Chat" ? "chat" : "reply",
-        actorName: n.sourceModule,
-        title: n.title,
-        excerpt: n.description,
-        sourceModule: n.category === "Chat" ? "KAMPUS Chat" : "Student Community",
-        linkRoute: n.linkRoute || (n.category === "Chat" ? "/connect/chat" : "/connect/community"),
-        timestamp: n.createdAt
-      });
-    }
-  }
-  const chatDb = safeReadJson(CHAT_DB_PATH);
-  for (const reqItem of chatDb?.requests || []) {
-    if (reqItem.toUserId === userId && reqItem.status === "pending") {
-      items.push({
-        id: `soc_chatreq_${reqItem.id}`,
-        kind: "chat",
-        actorName: reqItem.fromName,
-        title: `Message request from ${reqItem.fromName}`,
-        excerpt: reqItem.preview || "Sent you a direct message request.",
-        sourceModule: "KAMPUS Chat",
-        linkRoute: "/connect/chat",
-        timestamp: reqItem.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      });
-    }
-  }
-  const commDb = safeReadJson(COMMUNITY_DB_PATH);
-  for (const post of commDb?.posts || []) {
-    if (post.authorId === userId && Array.isArray(post.replies)) {
-      for (const rep of post.replies.slice(0, 5)) {
-        items.push({
-          id: `soc_comm_${rep.id}`,
-          kind: rep.accepted ? "accepted_answer" : "reply",
-          actorName: rep.authorName || "Student",
-          title: `${rep.authorName || "A peer"} replied on "${post.title}"`,
-          excerpt: rep.content,
-          sourceModule: "Student Community",
-          linkRoute: "/connect/community",
-          timestamp: rep.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-        });
-      }
-    }
-  }
-  return items.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 50);
-}
-function isUserEligibleForAnnouncement(ann, userCollege, userCourse) {
-  if (ann.targetAudience === "All Students") return true;
-  const val = (ann.targetValue || "").trim().toLowerCase();
-  if (!val) return true;
-  if (ann.targetAudience === "Selected Colleges") {
-    return (userCollege || "").toLowerCase().includes(val);
-  }
-  if (ann.targetAudience === "Selected Courses") {
-    return (userCourse || "").toLowerCase().includes(val);
-  }
-  return true;
-}
-function registerNotificationsBackend(app) {
-  const db = loadDb12();
-  const wss = new WebSocketServer3({ noServer: true });
-  const socketsByUser = /* @__PURE__ */ new Map();
-  wss.on("connection", (ws, req) => {
-    const url = new URL(req.url || "/", "http://localhost");
-    const userId = url.searchParams.get("userId") || "anonymous";
-    if (!socketsByUser.has(userId)) {
-      socketsByUser.set(userId, /* @__PURE__ */ new Set());
-    }
-    socketsByUser.get(userId).add(ws);
-    ws.send(JSON.stringify({ type: "connected", userId, timestamp: (/* @__PURE__ */ new Date()).toISOString() }));
-    ws.on("close", () => {
-      const set = socketsByUser.get(userId);
-      if (set) {
-        set.delete(ws);
-        if (set.size === 0) socketsByUser.delete(userId);
-      }
-    });
-  });
-  const emitToUser = (userId, payload) => {
-    const sockets = socketsByUser.get(userId);
-    if (!sockets) return;
-    const msg = JSON.stringify(payload);
-    for (const sock of sockets) {
-      if (sock.readyState === WebSocket3.OPEN) {
-        sock.send(msg);
-      }
-    }
-  };
-  const promoteScheduledAnnouncements = () => {
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    let changed = false;
-    for (const ann of db.announcements) {
-      if (ann.status === "Scheduled" && ann.scheduledFor && ann.scheduledFor <= nowIso) {
-        ann.status = "Published";
-        ann.updatedAt = nowIso;
-        changed = true;
-      }
-    }
-    if (changed) saveDb12(db);
-  };
-  app.post("/api/notifications/bootstrap", (req, res) => {
-    const { userId, college, course } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid) return res.status(400).json({ message: "userId is required." });
-    promoteScheduledAnnouncements();
-    const prefs = ensurePreferences(db, uid);
-    saveDb12(db);
-    const userNotifications = db.notifications.filter((n) => n.userId === uid).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const active = userNotifications.filter((n) => !n.deleted && !n.archived);
-    const roleInfo = db.roleOverrides[uid] || { role: "Student", label: null };
-    const isAdmin = roleInfo.role === "Publisher Admin";
-    const announcements = isAdmin ? db.announcements : db.announcements.filter(
-      (a) => a.status === "Published" && isUserEligibleForAnnouncement(a, college, course)
-    );
-    return res.json({
-      notifications: userNotifications,
-      unreadCount: active.filter((n) => !n.read).length,
-      preferences: prefs,
-      channelCapabilities: getChannelCapabilities(),
-      pushSubscriptions: db.pushSubscriptions.filter((s) => s.userId === uid),
-      reminders: buildAggregatedReminders(db, uid),
-      announcements: [...announcements].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-      socialActivity: buildSocialActivity(db, uid),
-      roleInfo
-    });
-  });
-  app.post("/api/notifications", (req, res) => {
-    const b = req.body || {};
-    const userId = String(b.userId || "").trim();
-    const title = String(b.title || "").trim();
-    const description = String(b.description || "").trim();
-    if (!userId || !title) {
-      return res.status(400).json({ message: "userId and title are required." });
-    }
-    const prefs = ensurePreferences(db, userId);
-    const idemKey = b.idempotencyKey ? String(b.idempotencyKey).trim() : void 0;
-    if (idemKey) {
-      const existing = db.notifications.find((n) => n.userId === userId && n.idempotencyKey === idemKey);
-      if (existing) {
-        return res.status(200).json({ notification: existing, deduplicated: true });
-      }
-    } else {
-      const recentCutoff = Date.now() - 45e3;
-      const dup = db.notifications.find(
-        (n) => n.userId === userId && !n.deleted && n.title === title && n.description === description && new Date(n.createdAt).getTime() >= recentCutoff
-      );
-      if (dup) {
-        return res.status(200).json({ notification: dup, deduplicated: true });
-      }
-    }
-    const rules = assignCategoryAndRules({
-      title,
-      description,
-      legacyType: b.type,
-      category: b.category,
-      linkRoute: b.linkRoute,
-      sourceModule: b.sourceModule,
-      subType: b.subType,
-      priority: b.priority
-    });
-    const allowed = isCategoryAllowedByPreferences(prefs, rules.category, rules.subType);
-    const quietActive = isWithinQuietHours(prefs.quietHours);
-    const isCriticalSecurity = rules.category === "System" && rules.subType === "security_alert";
-    const suppressedByQuietHours = quietActive && !isCriticalSecurity && rules.priority !== "Urgent";
-    const deliveryRecords = buildDeliveryRecords(db, userId, prefs, allowed, suppressedByQuietHours);
-    if (!allowed) {
-      return res.status(200).json({
-        notification: null,
-        suppressedByPreference: true,
-        deliveryRecords
-      });
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const record = {
-      id: `notif_${crypto9.randomUUID().slice(0, 10)}`,
-      userId,
-      title,
-      description,
-      details: b.details ? String(b.details) : void 0,
-      category: rules.category,
-      subType: rules.subType,
-      sourceModule: rules.sourceModule,
-      priority: rules.priority,
-      read: false,
-      archived: false,
-      deleted: false,
-      deletedAt: null,
-      important: Boolean(b.important) || rules.priority === "Urgent",
-      isMention: Boolean(b.isMention ?? rules.isMention),
-      isReminder: Boolean(b.isReminder ?? rules.isReminder),
-      linkRoute: b.linkRoute ? String(b.linkRoute) : void 0,
-      actionLabel: b.actionLabel ? String(b.actionLabel) : "Open Page",
-      idempotencyKey: idemKey,
-      suppressedByQuietHours,
-      deliveryRecords,
-      createdAt: now,
-      updatedAt: now
-    };
-    db.notifications.unshift(record);
-    let countForUser = 0;
-    db.notifications = db.notifications.filter((n) => {
-      if (n.userId !== userId) return true;
-      countForUser += 1;
-      return countForUser <= 400;
-    });
-    saveDb12(db);
-    emitToUser(userId, { type: "notification:created", notification: record });
-    return res.status(201).json({ notification: record });
-  });
-  app.patch("/api/notifications/:id", (req, res, next) => {
-    const { id } = req.params;
-    if (id === "read-all") return next();
-    const { userId, read, archived, important, deleted } = req.body || {};
-    const uid = String(userId || "").trim();
-    const item = db.notifications.find((n) => n.id === id);
-    if (!item) return res.status(404).json({ message: "Notification not found." });
-    if (item.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
-    if (typeof read === "boolean") item.read = read;
-    if (typeof archived === "boolean") item.archived = archived;
-    if (typeof important === "boolean") item.important = important;
-    if (typeof deleted === "boolean") {
-      item.deleted = deleted;
-      item.deletedAt = deleted ? (/* @__PURE__ */ new Date()).toISOString() : null;
-    }
-    item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb12(db);
-    emitToUser(uid, { type: "notification:updated", notification: item });
-    return res.json({ notification: item });
-  });
-  app.post("/api/notifications/bulk", (req, res) => {
-    const { userId, action, ids, confirmed } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid || !action) return res.status(400).json({ message: "userId and action are required." });
-    if ((action === "delete" || action === "clear-read") && confirmed !== true) {
-      return res.status(400).json({ message: "Confirmation is required before destructive bulk actions." });
-    }
-    const idSet = new Set(Array.isArray(ids) ? ids.map(String) : []);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    let affected = 0;
-    for (const n of db.notifications) {
-      if (n.userId !== uid || n.deleted) continue;
-      if (action === "mark-all-read") {
-        if (!n.read) {
-          n.read = true;
-          n.updatedAt = now;
-          affected += 1;
-        }
-      } else if (action === "clear-read") {
-        if (n.read && !n.archived) {
-          n.deleted = true;
-          n.deletedAt = now;
-          n.updatedAt = now;
-          affected += 1;
-        }
-      } else if (idSet.has(n.id)) {
-        if (action === "mark-read") n.read = true;
-        else if (action === "mark-unread") n.read = false;
-        else if (action === "archive") n.archived = true;
-        else if (action === "unarchive") n.archived = false;
-        else if (action === "delete") {
-          n.deleted = true;
-          n.deletedAt = now;
-        }
-        n.updatedAt = now;
-        affected += 1;
-      }
-    }
-    saveDb12(db);
-    emitToUser(uid, { type: "notification:bulk", action, affected });
-    return res.json({ affected, notifications: db.notifications.filter((n) => n.userId === uid) });
-  });
-  app.put("/api/notifications/preferences", (req, res) => {
-    const { userId, preferences } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid || !preferences) {
-      return res.status(400).json({ message: "userId and preferences are required." });
-    }
-    const current = ensurePreferences(db, uid);
-    const next = {
-      ...current,
-      ...preferences,
-      userId: uid,
-      modules: {
-        ...current.modules,
-        ...preferences.modules || {},
-        system: {
-          ...current.modules.system,
-          ...preferences.modules?.system || {},
-          securityAlerts: true
-          // Strictly enforced mandatory policy
-        }
-      },
-      channels: {
-        ...current.channels,
-        ...preferences.channels || {}
-      },
-      quietHours: {
-        ...current.quietHours,
-        ...preferences.quietHours || {}
-      },
-      digest: {
-        ...current.digest,
-        ...preferences.digest || {}
-      },
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    db.preferencesByUser[uid] = next;
-    saveDb12(db);
-    return res.json({ preferences: next, channelCapabilities: getChannelCapabilities() });
-  });
-  app.post("/api/notifications/push-subscription", (req, res) => {
-    const { userId, permissionState, platform, active } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid) return res.status(400).json({ message: "userId is required." });
-    const existing = db.pushSubscriptions.find((s) => s.userId === uid);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (existing) {
-      existing.permissionState = permissionState || existing.permissionState;
-      existing.platform = platform || existing.platform;
-      existing.active = typeof active === "boolean" ? active : existing.active;
-      existing.updatedAt = now;
-    } else {
-      db.pushSubscriptions.push({
-        id: `push_${crypto9.randomUUID().slice(0, 8)}`,
-        userId: uid,
-        endpointLabel: "Web Browser Notification API",
-        permissionState: permissionState || "default",
-        platform: platform || "Web Browser",
-        active: Boolean(active),
-        updatedAt: now
-      });
-    }
-    const prefs = ensurePreferences(db, uid);
-    if (permissionState === "granted" && active) {
-      prefs.channels.browserPush = true;
-    } else if (active === false) {
-      prefs.channels.browserPush = false;
-    }
-    saveDb12(db);
-    return res.json({
-      pushSubscriptions: db.pushSubscriptions.filter((s) => s.userId === uid),
-      preferences: prefs
-    });
-  });
-  app.get("/api/notifications/reminders", (req, res) => {
-    const uid = String(req.query.userId || "").trim();
-    if (!uid) return res.status(400).json({ message: "userId is required." });
-    return res.json({ reminders: buildAggregatedReminders(db, uid) });
-  });
-  app.post("/api/notifications/reminders/action", (req, res) => {
-    const { userId, sourceModule, sourceItemId, action, dateISO, time } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid || !sourceModule || !sourceItemId || !action) {
-      return res.status(400).json({ message: "userId, sourceModule, sourceItemId, and action are required." });
-    }
-    if (sourceModule === "KAMPUS Planner" && !String(sourceItemId).startsWith("exam_")) {
-      const planner = safeReadJson(PLANNER_DB_PATH);
-      if (planner && Array.isArray(planner.tasks)) {
-        const task = planner.tasks.find((t) => t.id === sourceItemId && t.userId === uid);
-        if (task) {
-          if (action === "complete") {
-            task.status = "Completed";
-            task.reminderState = "Completed";
-            task.completedAt = (/* @__PURE__ */ new Date()).toISOString();
-          } else if (action === "snooze") {
-            const nextDay = dateISO || new Date(Date.now() + 864e5).toISOString().slice(0, 10);
-            task.reminderState = "Snoozed";
-            task.snoozedUntilISO = nextDay;
-            task.dueDateISO = nextDay;
-          } else if (action === "reschedule" && dateISO) {
-            task.dueDateISO = dateISO;
-            if (time) task.dueTime = time;
-            task.reminderState = "Active";
-          }
-          task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-          fs10.writeFileSync(PLANNER_DB_PATH, JSON.stringify(planner, null, 2), "utf8");
-        }
-      }
-    } else {
-      const key = `${uid}::${sourceModule}::${sourceItemId}`;
-      const existing = db.reminderOverrides[key] || { updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-      if (action === "complete") {
-        existing.status = "Completed";
-      } else if (action === "snooze") {
-        existing.status = "Snoozed";
-        existing.snoozedUntilISO = dateISO || new Date(Date.now() + 864e5).toISOString().slice(0, 10);
-      } else if (action === "reschedule" && dateISO) {
-        existing.status = "Upcoming";
-        existing.rescheduledDateISO = dateISO;
-        if (time) existing.rescheduledTime = time;
-      }
-      existing.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      db.reminderOverrides[key] = existing;
-      saveDb12(db);
-    }
-    return res.json({ reminders: buildAggregatedReminders(db, uid) });
-  });
-  app.post("/api/notifications/auth/role-session", (req, res) => {
-    const { userId, passkey, revert } = req.body || {};
-    const uid = String(userId || "").trim();
-    if (!uid) return res.status(400).json({ message: "userId is required." });
-    if (revert) {
-      delete db.roleOverrides[uid];
-      saveDb12(db);
-      return res.json({ roleInfo: { role: "Student", label: null } });
-    }
-    if (passkey !== PUBLISHER_ADMIN_PASSKEY) {
-      return res.status(403).json({ message: "Invalid official publisher passkey." });
-    }
-    db.roleOverrides[uid] = {
-      role: "Publisher Admin",
-      label: "Authorized Campus Publisher"
-    };
-    saveDb12(db);
-    return res.json({ roleInfo: db.roleOverrides[uid] });
-  });
-  app.post("/api/notifications/announcements", (req, res) => {
-    const b = req.body || {};
-    const uid = String(b.userId || "").trim();
-    const roleInfo = db.roleOverrides[uid];
-    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
-      return res.status(403).json({ message: "Only authorized publishers can create official announcements." });
-    }
-    const title = String(b.title || "").trim();
-    const description = String(b.description || "").trim();
-    if (!title || !description) {
-      return res.status(400).json({ message: "Title and description are required." });
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const scheduledFor = b.scheduledFor ? String(b.scheduledFor) : null;
-    const status = b.status === "Draft" ? "Draft" : scheduledFor && scheduledFor > now ? "Scheduled" : "Published";
-    const ann = {
-      id: `ann_${crypto9.randomUUID().slice(0, 10)}`,
-      title,
-      description,
-      publisherName: String(b.publisherName || "KAMPUS Administration"),
-      publisherRole: String(b.publisherRole || "Official Publisher"),
-      isOfficial: true,
-      category: b.category || "KAMPUS",
-      targetAudience: b.targetAudience || "All Students",
-      targetValue: b.targetValue ? String(b.targetValue) : void 0,
-      attachmentName: b.attachmentName ? String(b.attachmentName) : void 0,
-      linkRoute: b.linkRoute ? String(b.linkRoute) : "/account/notifications",
-      scheduledFor,
-      status,
-      createdAt: now,
-      updatedAt: now,
-      readByUserIds: [],
-      clickedByUserIds: []
-    };
-    db.announcements.unshift(ann);
-    saveDb12(db);
-    if (ann.status === "Published") {
-      for (const [targetUid, sockets] of socketsByUser.entries()) {
-        for (const sock of sockets) {
-          if (sock.readyState === WebSocket3.OPEN) {
-            sock.send(JSON.stringify({ type: "announcement:published", announcement: ann, userId: targetUid }));
-          }
-        }
-      }
-    }
-    return res.status(201).json({ announcement: ann });
-  });
-  app.patch("/api/notifications/announcements/:id", (req, res) => {
-    const { id } = req.params;
-    const b = req.body || {};
-    const uid = String(b.userId || "").trim();
-    const roleInfo = db.roleOverrides[uid];
-    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
-      return res.status(403).json({ message: "Only authorized publishers can edit official announcements." });
-    }
-    const ann = db.announcements.find((a) => a.id === id);
-    if (!ann) return res.status(404).json({ message: "Announcement not found." });
-    if (b.title !== void 0) ann.title = String(b.title);
-    if (b.description !== void 0) ann.description = String(b.description);
-    if (b.category !== void 0) ann.category = b.category;
-    if (b.targetAudience !== void 0) ann.targetAudience = b.targetAudience;
-    if (b.targetValue !== void 0) ann.targetValue = b.targetValue;
-    if (b.status !== void 0) ann.status = b.status;
-    if (b.scheduledFor !== void 0) ann.scheduledFor = b.scheduledFor;
-    ann.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb12(db);
-    return res.json({ announcement: ann });
-  });
-  app.delete("/api/notifications/announcements/:id", (req, res) => {
-    const { id } = req.params;
-    const uid = String(req.query.userId || "").trim();
-    const roleInfo = db.roleOverrides[uid];
-    if (!roleInfo || roleInfo.role !== "Publisher Admin") {
-      return res.status(403).json({ message: "Only authorized publishers can delete official announcements." });
-    }
-    const idx = db.announcements.findIndex((a) => a.id === id);
-    if (idx === -1) return res.status(404).json({ message: "Announcement not found." });
-    db.announcements.splice(idx, 1);
-    saveDb12(db);
-    return res.json({ deleted: true });
-  });
-  app.post("/api/notifications/announcements/:id/engage", (req, res) => {
-    const { id } = req.params;
-    const { userId, kind } = req.body || {};
-    const uid = String(userId || "").trim();
-    const ann = db.announcements.find((a) => a.id === id);
-    if (!ann || !uid) return res.status(404).json({ message: "Announcement not found." });
-    if (kind === "click") {
-      if (!ann.clickedByUserIds.includes(uid)) ann.clickedByUserIds.push(uid);
-      if (!ann.readByUserIds.includes(uid)) ann.readByUserIds.push(uid);
-    } else {
-      if (!ann.readByUserIds.includes(uid)) ann.readByUserIds.push(uid);
-    }
-    saveDb12(db);
-    return res.json({ announcement: ann });
-  });
-  const getUid = (req) => {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.split(" ")[1];
-      try {
-        const decoded = jwt2.decode(token);
-        if (decoded && (decoded.sub || decoded.userId)) {
-          return decoded.sub || decoded.userId;
-        }
-      } catch {
-      }
-    }
-    const headerUserId = req.headers["x-user-id"] || req.headers["x-clerk-user-id"];
-    if (headerUserId && typeof headerUserId === "string" && headerUserId.trim().length > 0) {
-      return headerUserId.trim();
-    }
-    const queryUid = req.query.userId || req.body?.userId;
-    if (queryUid && typeof queryUid === "string" && queryUid.trim().length > 0) {
-      return queryUid.trim();
-    }
-    return "student_default";
-  };
-  const seedDefaultNotificationsForUser = (uid) => {
-    const existing = db.notifications.filter((n) => n.userId === uid && !n.deleted);
-    if (existing.length > 0) return;
-    const now = Date.now();
-    const sampleNotifications = [
-      {
-        title: "End-Sem Examination Schedule Published",
-        description: "Dean of Academic Affairs has released the official timetable & hall seating distribution.",
-        details: "All students are requested to verify their course registration slips and report any slot clashes to exam@kampus.edu by Friday.",
-        category: "Academic",
-        priority: "Important",
-        linkRoute: "StudyHub",
-        actionLabel: "View Schedule",
-        timeOffsetMs: 15 * 60 * 1e3
-      },
-      {
-        title: "Flagship Hackathon 2026: CodeWave Registration",
-        description: "Annual hackathon is now live! \u20B92,50,000 prize pool, cloud credits & mentorship from Google DSC.",
-        details: "Team formation open up to 4 members. Early bird registration ends Sunday at midnight.",
-        category: "Campus",
-        priority: "Urgent",
-        linkRoute: "CampusLife",
-        actionLabel: "Register Now",
-        timeOffsetMs: 2 * 3600 * 1e3
-      },
-      {
-        title: "New Study Group Active: CS Algorithms & LeetCode",
-        description: "Rohan Verma shared detailed solutions for Dynamic Programming on Trees.",
-        category: "Community",
-        priority: "Normal",
-        linkRoute: "Community",
-        actionLabel: "Join Discussion",
-        timeOffsetMs: 5 * 3600 * 1e3
-      },
-      {
-        title: "Order Confirmed: Casio fx-991EX Scientific Calculator",
-        description: "Seller Kavita Joshi accepted your order. Meetup scheduled at Central Library foyer.",
-        category: "Market",
-        priority: "Important",
-        linkRoute: "Market",
-        actionLabel: "Track Order",
-        timeOffsetMs: 24 * 3600 * 1e3
-      },
-      {
-        title: "Welcome to KAMPUS Digital Identity",
-        description: "Complete your student profile to unlock verified digital student ID card & campus perks.",
-        category: "System",
-        priority: "Low",
-        linkRoute: "Profile",
-        actionLabel: "Edit Profile",
-        timeOffsetMs: 48 * 3600 * 1e3
-      },
-      {
-        title: "Pre-Placement Talk: Google Cloud & Microsoft",
-        description: "Career Services invites 3rd and 4th year scholars for interactive roadmap session tomorrow at 4 PM.",
-        category: "Career",
-        priority: "Important",
-        linkRoute: "Career",
-        actionLabel: "View Details",
-        timeOffsetMs: 72 * 3600 * 1e3
-      }
-    ];
-    for (const s of sampleNotifications) {
-      const createdAt = new Date(now - s.timeOffsetMs).toISOString();
-      db.notifications.push({
-        id: `notif_${crypto9.randomUUID().slice(0, 10)}`,
-        userId: uid,
-        title: s.title,
-        description: s.description,
-        details: s.details,
-        category: s.category,
-        subType: "announcement",
-        sourceModule: "system",
-        priority: s.priority,
-        read: s.timeOffsetMs > 24 * 3600 * 1e3,
-        archived: false,
-        deleted: false,
-        deletedAt: null,
-        important: s.priority === "Urgent" || s.priority === "Important",
-        isMention: false,
-        isReminder: false,
-        linkRoute: s.linkRoute,
-        actionLabel: s.actionLabel || "Open",
-        suppressedByQuietHours: false,
-        deliveryRecords: [],
-        createdAt,
-        updatedAt: createdAt
-      });
-    }
-    saveDb12(db);
-  };
-  app.get("/api/notifications", (req, res) => {
-    const uid = getUid(req);
-    promoteScheduledAnnouncements();
-    ensurePreferences(db, uid);
-    seedDefaultNotificationsForUser(uid);
-    const category = req.query.category ? String(req.query.category).trim() : null;
-    const unreadOnly = req.query.unreadOnly === "true" || req.query.unread === "true";
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
-    const page = Math.max(1, Number(req.query.page) || 1);
-    let list = db.notifications.filter((n) => n.userId === uid && !n.deleted && !n.archived).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const totalUnread = list.filter((n) => !n.read).length;
-    if (category && category !== "All") {
-      list = list.filter((n) => n.category.toLowerCase() === category.toLowerCase());
-    }
-    if (unreadOnly) {
-      list = list.filter((n) => !n.read);
-    }
-    const total = list.length;
-    const paginated = list.slice((page - 1) * limit, page * limit);
-    return res.json({
-      notifications: paginated,
-      unreadCount: totalUnread,
-      total,
-      page,
-      limit,
-      preferences: db.preferencesByUser[uid] || null
-    });
-  });
-  app.get("/api/notifications/unread-count", (req, res) => {
-    const uid = getUid(req);
-    seedDefaultNotificationsForUser(uid);
-    const unread = db.notifications.filter(
-      (n) => n.userId === uid && !n.read && !n.deleted && !n.archived
-    ).length;
-    return res.json({ unreadCount: unread, count: unread });
-  });
-  app.patch("/api/notifications/:id/read", (req, res) => {
-    const { id } = req.params;
-    const uid = getUid(req);
-    const notif = db.notifications.find((n) => n.id === id);
-    if (!notif) return res.status(404).json({ message: "Notification not found." });
-    if (notif.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
-    notif.read = true;
-    notif.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveDb12(db);
-    emitToUser(uid, { type: "notification:updated", notification: notif });
-    return res.json({ success: true, notification: notif });
-  });
-  app.patch("/api/notifications/read-all", (req, res) => {
-    const uid = getUid(req);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    let updatedCount = 0;
-    for (const n of db.notifications) {
-      if (n.userId === uid && !n.read && !n.deleted) {
-        n.read = true;
-        n.updatedAt = now;
-        updatedCount += 1;
-      }
-    }
-    saveDb12(db);
-    emitToUser(uid, { type: "notification:all-read", count: updatedCount });
-    return res.json({ success: true, updatedCount });
-  });
-  app.delete("/api/notifications/:id", (req, res) => {
-    const { id } = req.params;
-    const uid = getUid(req);
-    const notif = db.notifications.find((n) => n.id === id);
-    if (!notif) return res.status(404).json({ message: "Notification not found." });
-    if (notif.userId !== uid) return res.status(403).json({ message: "Unauthorized." });
-    notif.deleted = true;
-    notif.deletedAt = (/* @__PURE__ */ new Date()).toISOString();
-    notif.updatedAt = notif.deletedAt;
-    saveDb12(db);
-    emitToUser(uid, { type: "notification:deleted", id });
-    return res.json({ success: true, id });
-  });
-  app.delete("/api/notifications", (req, res) => {
-    const uid = getUid(req);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    let clearedCount = 0;
-    for (const n of db.notifications) {
-      if (n.userId === uid && !n.deleted) {
-        n.deleted = true;
-        n.deletedAt = now;
-        n.updatedAt = now;
-        clearedCount += 1;
-      }
-    }
-    saveDb12(db);
-    return res.json({ success: true, clearedCount });
-  });
-  app.get("/api/notifications/preferences", (req, res) => {
-    const uid = getUid(req);
-    const prefs = ensurePreferences(db, uid);
-    return res.json({ preferences: prefs });
-  });
-  app.post("/api/notifications/push-token", (req, res) => {
-    const uid = getUid(req);
-    const { token, platform } = req.body || {};
-    if (!token) return res.status(400).json({ message: "Token is required." });
-    const existingIdx = db.pushSubscriptions.findIndex((s) => s.userId === uid && s.deviceToken === token);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (existingIdx >= 0) {
-      db.pushSubscriptions[existingIdx].updatedAt = now;
-    } else {
-      db.pushSubscriptions.push({
-        id: `sub_${crypto9.randomUUID().slice(0, 8)}`,
-        userId: uid,
-        endpointLabel: token,
-        deviceLabel: platform ? `${platform} Device` : "Mobile Device",
-        permissionState: "granted",
-        platform: platform || "mobile",
-        active: true,
-        updatedAt: now
-      });
-    }
-    saveDb12(db);
-    return res.json({ success: true, registered: true });
-  });
-  globalThis.__kampusEmitToUser = emitToUser;
-  return wss;
-}
-function dispatchNotification(params) {
-  const db = loadDb12();
-  const userId = params.userId || "student_default";
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const notif = {
-    id: `notif_${crypto9.randomUUID().slice(0, 10)}`,
-    userId,
-    title: params.title,
-    description: params.description,
-    details: params.details,
-    category: params.category || "Campus",
-    subType: "direct_alert",
-    sourceModule: params.sourceModule || "system",
-    priority: params.priority || "Normal",
-    read: false,
-    archived: false,
-    deleted: false,
-    deletedAt: null,
-    important: Boolean(params.important),
-    isMention: false,
-    isReminder: false,
-    linkRoute: params.linkRoute,
-    actionLabel: params.actionLabel || "View",
-    suppressedByQuietHours: false,
-    deliveryRecords: [],
-    createdAt: now,
-    updatedAt: now
-  };
-  db.notifications.unshift(notif);
-  saveDb12(db);
-  if (typeof globalThis.__kampusEmitToUser === "function") {
-    globalThis.__kampusEmitToUser(userId, { type: "notification:created", notification: notif });
-  }
-  return notif;
 }
 
 // server/accountProfileSettingsBackend.ts
 import crypto10 from "crypto";
 import fs11 from "fs";
 import path18 from "path";
-import jwt3 from "jsonwebtoken";
+import jwt4 from "jsonwebtoken";
 var DB_PATH8 = path18.join(process.cwd(), ".kampus_account_db.json");
 var PROFILE_MOD_PASSKEY = "KAMPUS_PROFILE_MOD_2026";
 var COMMUNITY_DB_PATH2 = path18.join(process.cwd(), ".kampus_community_db.json");
@@ -17776,12 +18120,12 @@ var KAMPUS_ID_DB_PATH2 = path18.join(process.cwd(), ".kampus_kampus_id_db.json")
 var CHAT_DB_PATH2 = path18.join(process.cwd(), ".kampus_chat_db.json");
 var NOTIF_DB_PATH = path18.join(process.cwd(), ".kampus_notifications_db.json");
 var AVATARS_DIR = path18.join(process.cwd(), "uploads", "avatars");
-function getAuthenticatedUserId(req) {
+function getAuthenticatedUserId2(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
     try {
-      const decoded = jwt3.decode(token);
+      const decoded = jwt4.decode(token);
       if (decoded && (decoded.sub || decoded.userId)) {
         return decoded.sub || decoded.userId;
       }
@@ -18156,7 +18500,7 @@ function registerAccountProfileSettingsBackend(app) {
   }
   const db = loadDb13();
   app.get("/api/profile", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     const completion = computeProfileCompletion(profile);
     const { stats, activity, eligibleCertificates, unlockedBadges } = aggregateCrossModuleData(userId, profile);
@@ -18173,7 +18517,7 @@ function registerAccountProfileSettingsBackend(app) {
     });
   });
   app.patch("/api/profile", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const current = ensureProfile(db, { userId });
     const patch = req.body || {};
     if (patch.fullName !== void 0 && !String(patch.fullName).trim()) {
@@ -18220,7 +18564,7 @@ function registerAccountProfileSettingsBackend(app) {
   });
   app.post("/api/profile/avatar", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId(req);
+      const userId = getAuthenticatedUserId2(req);
       const { fileBase64, fileName = "avatar.jpg" } = req.body || {};
       if (!fileBase64 || typeof fileBase64 !== "string") {
         return res.status(400).json({ success: false, message: "Image base64 data is required." });
@@ -18253,7 +18597,7 @@ function registerAccountProfileSettingsBackend(app) {
     }
   });
   app.delete("/api/profile/avatar", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     if (profile.avatarUrl && profile.avatarUrl.startsWith("/uploads/avatars/")) {
       const localPath = path18.join(process.cwd(), profile.avatarUrl);
@@ -18271,7 +18615,7 @@ function registerAccountProfileSettingsBackend(app) {
     return res.json({ success: true, avatarUrl: "", message: "Profile photo removed." });
   });
   app.get("/api/profile/username-check", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const q = String(req.query.username || "").trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "");
     if (q.length < 3) {
       return res.json({ available: false, username: q, message: "Username must be at least 3 characters." });
@@ -18289,13 +18633,13 @@ function registerAccountProfileSettingsBackend(app) {
     });
   });
   app.get("/api/settings", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     const settings = ensureSettings(db, userId, profile);
     return res.json({ success: true, settings });
   });
   app.patch("/api/settings", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const patch = req.body || {};
     const profile = ensureProfile(db, { userId });
     const current = ensureSettings(db, userId, profile);
@@ -18316,7 +18660,7 @@ function registerAccountProfileSettingsBackend(app) {
     return res.json({ success: true, settings: updated });
   });
   app.get("/api/settings/privacy", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     const settings = ensureSettings(db, userId, profile);
     return res.json({
@@ -18326,7 +18670,7 @@ function registerAccountProfileSettingsBackend(app) {
     });
   });
   app.patch("/api/settings/privacy", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     const settings = ensureSettings(db, userId, profile);
     const patch = req.body || {};
@@ -18359,7 +18703,7 @@ function registerAccountProfileSettingsBackend(app) {
     return res.json({ success: true, privacy: settings.privacy, profilePrivacy: profile.privacy });
   });
   app.get("/api/settings/notifications", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const notifDb = safeReadJson2(NOTIF_DB_PATH);
     const userPrefs = notifDb?.preferencesByUser?.[userId];
     const cleanPrefs = {
@@ -18373,7 +18717,7 @@ function registerAccountProfileSettingsBackend(app) {
     return res.json({ success: true, preferences: cleanPrefs });
   });
   app.patch("/api/settings/notifications", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const patch = req.body || {};
     let notifDb = safeReadJson2(NOTIF_DB_PATH);
     if (!notifDb) notifDb = { preferencesByUser: {} };
@@ -18410,7 +18754,7 @@ function registerAccountProfileSettingsBackend(app) {
     });
   });
   app.get("/api/account", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = ensureProfile(db, { userId });
     const settings = ensureSettings(db, userId, profile);
     return res.json({
@@ -18431,7 +18775,7 @@ function registerAccountProfileSettingsBackend(app) {
     });
   });
   app.post("/api/account/export", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const profile = db.profiles[userId] || null;
     const settings = db.settings[userId] || null;
     const studyDb = safeReadJson2(path18.join(process.cwd(), ".kampus_studyhub_db.json"));
@@ -18450,7 +18794,7 @@ function registerAccountProfileSettingsBackend(app) {
     return res.json({ success: true, data: exportPayload });
   });
   app.post("/api/account/delete", (req, res) => {
-    const userId = getAuthenticatedUserId(req);
+    const userId = getAuthenticatedUserId2(req);
     const { confirmationPhrase, reason } = req.body || {};
     if (String(confirmationPhrase || "").trim() !== "DELETE MY ACCOUNT") {
       return res.status(400).json({
@@ -21996,7 +22340,7 @@ function registerSuperAdminBackend(app) {
 import crypto12 from "crypto";
 import fs13 from "fs";
 import path20 from "path";
-import jwt4 from "jsonwebtoken";
+import jwt5 from "jsonwebtoken";
 var DB_PATH10 = path20.join(process.cwd(), ".kampus_studyhub_db.json");
 var UPLOADS_DIR = path20.join(process.cwd(), "uploads", "study-materials");
 var INITIAL_QUESTIONS = [
@@ -22296,12 +22640,12 @@ function loadDb15() {
 function saveDb15(db) {
   studyhubStorage.saveSync(db);
 }
-function getAuthenticatedUserId2(req) {
+function getAuthenticatedUserId3(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
     try {
-      const decoded = jwt4.decode(token);
+      const decoded = jwt5.decode(token);
       if (decoded && (decoded.sub || decoded.userId)) {
         return decoded.sub || decoded.userId;
       }
@@ -22320,7 +22664,7 @@ function registerStudyHubBackend(app) {
   }
   app.get("/api/studyhub/notes", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { search, subject, sort = "updated" } = req.query;
       const db = loadDb15();
       let notes = db.notes.filter((n) => n.userId === userId || n.userId === "global_sample");
@@ -22346,7 +22690,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/notes", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { title, content, subject, tags, pinned = false } = req.body;
       if (!title || !title.trim()) {
         res.status(400).json({ success: false, error: "Note title is required." });
@@ -22374,7 +22718,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/notes/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const note = db.notes.find((n) => n.id === id && (n.userId === userId || n.userId === "global_sample"));
@@ -22389,7 +22733,7 @@ function registerStudyHubBackend(app) {
   });
   app.put("/api/studyhub/notes/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const { title, content, subject, tags, pinned } = req.body;
       const db = loadDb15();
@@ -22420,7 +22764,7 @@ function registerStudyHubBackend(app) {
   });
   app.patch("/api/studyhub/notes/:id/pin", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const note = db.notes.find((n) => n.id === id);
@@ -22438,7 +22782,7 @@ function registerStudyHubBackend(app) {
   });
   app.delete("/api/studyhub/notes/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const note = db.notes.find((n) => n.id === id);
@@ -22459,7 +22803,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/materials", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { search, subject } = req.query;
       const db = loadDb15();
       let materials = db.materials.filter((m) => m.isPublic || m.userId === userId || m.userId === "global_sample");
@@ -22480,7 +22824,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/materials", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { title, subject, fileName, fileType, fileSize, fileBase64, isPublic = true } = req.body;
       if (!title || !title.trim()) {
         res.status(400).json({ success: false, error: "Material title is required." });
@@ -22554,7 +22898,7 @@ function registerStudyHubBackend(app) {
   });
   app.delete("/api/studyhub/materials/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const mat = db.materials.find((m) => m.id === id);
@@ -22584,7 +22928,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/assignments", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { search, status, priority, subject, sort = "dueDate" } = req.query;
       const db = loadDb15();
       let assignments = db.assignments.filter(
@@ -22618,7 +22962,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/assignments", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { title, description, subject, dueDate, priority = "Medium", status = "Pending" } = req.body;
       if (!title || !title.trim()) {
         res.status(400).json({ success: false, error: "Assignment title is required." });
@@ -22651,7 +22995,7 @@ function registerStudyHubBackend(app) {
   });
   app.put("/api/studyhub/assignments/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const { title, description, subject, dueDate, priority, status } = req.body;
       const db = loadDb15();
@@ -22686,7 +23030,7 @@ function registerStudyHubBackend(app) {
   });
   app.patch("/api/studyhub/assignments/:id/status", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const { status } = req.body;
       const db = loadDb15();
@@ -22715,7 +23059,7 @@ function registerStudyHubBackend(app) {
   });
   app.delete("/api/studyhub/assignments/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const asgn = db.assignments.find((a) => a.id === id);
@@ -22736,7 +23080,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/planner/sessions", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { date, startDate, endDate, subject } = req.query;
       const db = loadDb15();
       let sessions = db.plannerSessions.filter(
@@ -22762,7 +23106,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/planner/sessions", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { subject, topic, date, startTime, endTime, goals, status = "Scheduled" } = req.body;
       if (!subject || !subject.trim()) {
         res.status(400).json({ success: false, error: "Subject is required." });
@@ -22814,7 +23158,7 @@ function registerStudyHubBackend(app) {
   });
   app.patch("/api/studyhub/planner/sessions/:id/complete", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const sess = db.plannerSessions.find((s) => s.id === id);
@@ -22840,7 +23184,7 @@ function registerStudyHubBackend(app) {
   });
   app.delete("/api/studyhub/planner/sessions/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       const sess = db.plannerSessions.find((s) => s.id === id);
@@ -22909,7 +23253,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/quiz/submit", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { subject, topic, answers } = req.body;
       if (!answers || typeof answers !== "object") {
         res.status(400).json({ success: false, error: "User answers object is required." });
@@ -22973,7 +23317,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/quiz/history", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const db = loadDb15();
       const attempts = db.quizAttempts.filter(
         (a) => a.userId === userId || a.userId === "global_sample"
@@ -22986,7 +23330,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/progress", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const db = loadDb15();
       const userNotes = db.notes.filter((n) => n.userId === userId || n.userId === "global_sample");
       const userAssignments = db.assignments.filter((a) => a.userId === userId || a.userId === "global_sample");
@@ -23090,7 +23434,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/overview", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const db = loadDb15();
       const todayStr = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
       const userNotes = db.notes.filter((n) => n.userId === userId || n.userId === "global_sample");
@@ -23134,12 +23478,12 @@ function registerStudyHubBackend(app) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
-  function isUserAdmin(userId, req) {
+  function isUserAdmin2(userId, req) {
     if (req.headers["x-admin-role"] === "super_admin" || req.headers["x-admin-role"] === "admin") return true;
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       try {
-        const decoded = jwt4.decode(authHeader.split(" ")[1]);
+        const decoded = jwt5.decode(authHeader.split(" ")[1]);
         if (decoded?.role === "admin" || decoded?.role === "super_admin") return true;
       } catch {
       }
@@ -23156,7 +23500,7 @@ function registerStudyHubBackend(app) {
   }
   app.get("/api/studyhub/subjects", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const db = loadDb15();
       const allSubjects = Array.isArray(db.subjects) ? db.subjects : [];
       const visibleSubjects = allSubjects.filter(
@@ -23173,7 +23517,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/subjects", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { code, name, level, course, semesterOrClass, description, isCommon } = req.body || {};
       const db = loadDb15();
       if (!Array.isArray(db.subjects)) db.subjects = [];
@@ -23181,7 +23525,7 @@ function registerStudyHubBackend(app) {
         res.status(400).json({ success: false, error: "Subject name is required." });
         return;
       }
-      const isAdmin = isUserAdmin(userId, req);
+      const isAdmin = isUserAdmin2(userId, req);
       const createCommon = Boolean(isCommon) && isAdmin;
       if (isCommon && !isAdmin) {
         res.status(403).json({
@@ -23216,7 +23560,7 @@ function registerStudyHubBackend(app) {
   });
   app.put("/api/studyhub/subjects/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const updates = req.body || {};
       const db = loadDb15();
@@ -23227,7 +23571,7 @@ function registerStudyHubBackend(app) {
         return;
       }
       const subj = db.subjects[idx];
-      const isAdmin = isUserAdmin(userId, req);
+      const isAdmin = isUserAdmin2(userId, req);
       if (subj.isCommon || !subj.ownerId) {
         if (!isAdmin) {
           res.status(403).json({
@@ -23261,7 +23605,7 @@ function registerStudyHubBackend(app) {
   });
   app.delete("/api/studyhub/subjects/:id", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const { id } = req.params;
       const db = loadDb15();
       if (!Array.isArray(db.subjects)) db.subjects = [];
@@ -23270,7 +23614,7 @@ function registerStudyHubBackend(app) {
         res.status(404).json({ success: false, error: "Subject not found." });
         return;
       }
-      const isAdmin = isUserAdmin(userId, req);
+      const isAdmin = isUserAdmin2(userId, req);
       if (subj.isCommon || !subj.ownerId) {
         if (!isAdmin) {
           res.status(403).json({
@@ -23295,7 +23639,7 @@ function registerStudyHubBackend(app) {
   });
   app.get("/api/studyhub/bootstrap", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const db = loadDb15();
       const userNotes = db.notes.filter((n) => n.userId === userId);
       const userMaterials = db.materials.filter((m) => m.isPublic || m.userId === userId);
@@ -23329,7 +23673,7 @@ function registerStudyHubBackend(app) {
   });
   app.post("/api/studyhub/sync", (req, res) => {
     try {
-      const userId = getAuthenticatedUserId2(req);
+      const userId = getAuthenticatedUserId3(req);
       const incoming = req.body || {};
       const db = loadDb15();
       if (Array.isArray(incoming.notes)) {
@@ -24274,7 +24618,7 @@ function registerStudyPartnerBackend(app) {
 import fs14 from "fs";
 import path24 from "path";
 import crypto15 from "crypto";
-import jwt5 from "jsonwebtoken";
+import jwt6 from "jsonwebtoken";
 import JSZip2 from "jszip";
 import { GoogleGenAI } from "@google/genai";
 var DB_PATH14 = path24.join(process.cwd(), ".kampus_ai_db.json");
@@ -24330,12 +24674,12 @@ function saveAiDatabase(db) {
     console.error("[KAMPUS AI DB] Error saving database:", err);
   }
 }
-function getAuthenticatedUserId3(req) {
+function getAuthenticatedUserId4(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const rawToken = authHeader.substring(7).trim();
     try {
-      const decoded = jwt5.decode(rawToken);
+      const decoded = jwt6.decode(rawToken);
       if (decoded && (decoded.sub || decoded.userId || decoded.id)) {
         return decoded.sub || decoded.userId || decoded.id;
       }
@@ -24671,7 +25015,7 @@ ${att.extractedText.slice(0, 25e3)}`
 function registerKampusAiBackend(app) {
   const db = loadAiDatabase();
   app.get("/api/ai/status", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
     const userUsage = db.usageByUser[userId]?.lastDate === today ? db.usageByUser[userId].requestsToday : 0;
     const limit = db.settings.dailyLimitPerUser || 100;
@@ -24704,7 +25048,7 @@ function registerKampusAiBackend(app) {
     });
   });
   app.get("/api/ai/conversations", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const userConvs = Object.values(db.conversations).filter((c) => c.userId === userId).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     return res.json({
       success: true,
@@ -24712,7 +25056,7 @@ function registerKampusAiBackend(app) {
     });
   });
   app.post("/api/ai/conversations", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const { title, mode = "normal", webSearchEnabled = false } = req.body || {};
     const id = "conv_" + Date.now() + "_" + crypto15.randomUUID().slice(0, 6);
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -24736,7 +25080,7 @@ function registerKampusAiBackend(app) {
     });
   });
   app.get("/api/ai/conversations/:id", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const convId = req.params.id;
     const conv = db.conversations[convId];
     if (!conv) {
@@ -24753,7 +25097,7 @@ function registerKampusAiBackend(app) {
     });
   });
   app.patch("/api/ai/conversations/:id", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const convId = req.params.id;
     const conv = db.conversations[convId];
     if (!conv) {
@@ -24771,7 +25115,7 @@ function registerKampusAiBackend(app) {
     return res.json({ success: true, conversation: conv });
   });
   app.delete("/api/ai/conversations/:id", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const convId = req.params.id;
     const conv = db.conversations[convId];
     if (!conv) {
@@ -24786,7 +25130,7 @@ function registerKampusAiBackend(app) {
     return res.json({ success: true, message: "Conversation deleted successfully." });
   });
   app.post("/api/ai/chat", async (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const {
       conversationId,
       message,
@@ -24917,7 +25261,7 @@ function registerKampusAiBackend(app) {
     }
   });
   app.post("/api/ai/chat/stream", async (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const {
       conversationId,
       message,
@@ -25147,7 +25491,7 @@ ${txt}`);
     }
   });
   app.post("/api/ai/feedback", (req, res) => {
-    const userId = getAuthenticatedUserId3(req);
+    const userId = getAuthenticatedUserId4(req);
     const { messageId, rating, comment } = req.body || {};
     if (!messageId || rating !== "up" && rating !== "down") {
       return res.status(400).json({ success: false, message: "Invalid feedback data." });
@@ -25194,7 +25538,7 @@ ${txt}`);
 // server/campusLifeBackend.ts
 import crypto16 from "crypto";
 import path25 from "path";
-import jwt6 from "jsonwebtoken";
+import jwt7 from "jsonwebtoken";
 var DB_PATH15 = path25.join(process.cwd(), ".kampus_campus_life_db.json");
 function createSeedDatabase11() {
   return {
@@ -25474,12 +25818,12 @@ function loadDb19() {
 function saveDb19(db) {
   campusLifeStorage.saveSync(db);
 }
-function getAuthenticatedUserId4(req) {
+function getAuthenticatedUserId5(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
     try {
-      const decoded = jwt6.decode(token);
+      const decoded = jwt7.decode(token);
       if (decoded && (decoded.sub || decoded.userId)) {
         return decoded.sub || decoded.userId;
       }
@@ -25499,7 +25843,7 @@ function getAuthenticatedUserId4(req) {
 function registerCampusLifeBackend(app) {
   const db = loadDb19();
   app.get("/api/campus-life/overview", (req, res) => {
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const featuredEvent = db.events.find((e) => e.featured) || db.events[0];
     const registeredEventIds = new Set(
       db.registrations.filter((r) => r.userId === uid && r.status === "Confirmed").map((r) => r.eventId)
@@ -25537,7 +25881,7 @@ function registerCampusLifeBackend(app) {
     });
   });
   app.get("/api/campus-life/events", (req, res) => {
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const category = req.query.category ? String(req.query.category).trim() : null;
     const query2 = req.query.q ? String(req.query.q).toLowerCase().trim() : null;
     const registeredEventIds = new Set(
@@ -25561,7 +25905,7 @@ function registerCampusLifeBackend(app) {
   });
   app.post("/api/campus-life/events/:id/register", (req, res) => {
     const { id } = req.params;
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const { userName = "KAMPUS Student", userEmail } = req.body || {};
     const event = db.events.find((e) => e.id === id);
     if (!event) {
@@ -25620,7 +25964,7 @@ function registerCampusLifeBackend(app) {
   });
   app.post("/api/campus-life/events/:id/cancel", (req, res) => {
     const { id } = req.params;
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const event = db.events.find((e) => e.id === id);
     if (!event) return res.status(404).json({ success: false, message: "Event not found." });
     const regIndex = db.registrations.findIndex(
@@ -25652,7 +25996,7 @@ function registerCampusLifeBackend(app) {
     });
   });
   app.get("/api/campus-life/clubs", (req, res) => {
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const category = req.query.category ? String(req.query.category).trim() : null;
     const joinedClubIds = new Set(
       db.memberships.filter((m) => m.userId === uid && m.status === "Active").map((m) => m.clubId)
@@ -25669,7 +26013,7 @@ function registerCampusLifeBackend(app) {
   });
   app.post("/api/campus-life/clubs/:id/join", (req, res) => {
     const { id } = req.params;
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const { userName = "KAMPUS Student" } = req.body || {};
     const club = db.clubs.find((c) => c.id === id);
     if (!club) return res.status(404).json({ success: false, message: "Club not found." });
@@ -25720,7 +26064,7 @@ function registerCampusLifeBackend(app) {
     return res.json({ items: list, count: list.length });
   });
   app.post("/api/campus-life/lost-found", (req, res) => {
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const {
       title,
       description,
@@ -25777,7 +26121,7 @@ function registerCampusLifeBackend(app) {
   });
   app.patch("/api/campus-life/lost-found/:id/resolve", (req, res) => {
     const { id } = req.params;
-    const uid = getAuthenticatedUserId4(req);
+    const uid = getAuthenticatedUserId5(req);
     const item = db.lostAndFound.find((i) => i.id === id);
     if (!item) return res.status(404).json({ success: false, message: "Item not found." });
     item.status = "Resolved";
@@ -25799,7 +26143,7 @@ function registerCampusLifeBackend(app) {
 // server/studentToolkitBackend.ts
 import crypto17 from "crypto";
 import path26 from "path";
-import jwt7 from "jsonwebtoken";
+import jwt8 from "jsonwebtoken";
 var DB_PATH16 = path26.join(process.cwd(), ".kampus_toolkit_db.json");
 var DEFAULT_TOOLS = [
   // Academic Calculators
@@ -26074,12 +26418,12 @@ function loadDb20() {
 function saveDb20(db) {
   toolkitStorage.saveSync(db);
 }
-function getAuthenticatedUserId5(req) {
+function getAuthenticatedUserId6(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
     try {
-      const decoded = jwt7.decode(token);
+      const decoded = jwt8.decode(token);
       if (decoded && (decoded.sub || decoded.userId)) {
         return decoded.sub || decoded.userId;
       }
@@ -26106,7 +26450,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.get("/api/toolkit/favorites", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const db = loadDb20();
     const userFavorites = db.favorites.filter((f) => f.userId === userId).map((f) => f.toolId);
     return res.json({
@@ -26115,7 +26459,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/favorites", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { toolId } = req.body || {};
     if (!toolId || typeof toolId !== "string") {
       return res.status(400).json({ success: false, message: "Invalid toolId provided." });
@@ -26139,7 +26483,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.delete("/api/toolkit/favorites/:toolId", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { toolId } = req.params;
     const db = loadDb20();
     db.favorites = db.favorites.filter((f) => !(f.userId === userId && f.toolId === toolId));
@@ -26152,7 +26496,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.get("/api/toolkit/history", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const limit = Math.min(50, parseInt(String(req.query.limit || "15"), 10) || 15);
     const db = loadDb20();
     const userHistory = db.history.filter((h) => h.userId === userId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, limit);
@@ -26162,7 +26506,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/history", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { toolId, actionSummary } = req.body || {};
     if (!toolId || typeof toolId !== "string") {
       return res.status(400).json({ success: false, message: "Valid toolId is required." });
@@ -26189,7 +26533,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.delete("/api/toolkit/history", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const entryId = req.query.id;
     const db = loadDb20();
     if (entryId) {
@@ -26204,7 +26548,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.get("/api/toolkit/preferences", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const db = loadDb20();
     const prefs = db.preferencesByUser[userId] || {
       calculatorAngleMode: "deg",
@@ -26221,7 +26565,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.put("/api/toolkit/preferences", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const updates = req.body || {};
     const db = loadDb20();
     const existing = db.preferencesByUser[userId] || {};
@@ -26237,7 +26581,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.get("/api/toolkit/productivity/bootstrap", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const db = loadDb20();
     const tasks = db.tasks.filter((t) => t.userId === userId);
     const timetable = db.timetable.filter((t) => t.userId === userId);
@@ -26260,7 +26604,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/productivity/tasks", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { title, subject, priority, dueDate, completed } = req.body || {};
     if (!title || typeof title !== "string" || !title.trim()) {
       return res.status(400).json({ success: false, message: "Task title is required." });
@@ -26284,7 +26628,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.put("/api/toolkit/productivity/tasks/:id", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { id } = req.params;
     const updates = req.body || {};
     const db = loadDb20();
@@ -26309,7 +26653,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.delete("/api/toolkit/productivity/tasks/:id", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { id } = req.params;
     const db = loadDb20();
     const task = db.tasks.find((t) => t.id === id);
@@ -26327,7 +26671,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/productivity/pomodoro/complete", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { focusMinutes } = req.body || {};
     const minutes = Math.max(1, Math.min(180, parseInt(String(focusMinutes || "25"), 10) || 25));
     const db = loadDb20();
@@ -26347,7 +26691,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/productivity/notes", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { id, title, content, category, isPinned } = req.body || {};
     const db = loadDb20();
     if (id) {
@@ -26385,7 +26729,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.delete("/api/toolkit/productivity/notes/:id", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { id } = req.params;
     const db = loadDb20();
     const note = db.quickNotes.find((n) => n.id === id);
@@ -26403,7 +26747,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.post("/api/toolkit/productivity/exams", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { examName, subject, examDate, room } = req.body || {};
     if (!examName || !examDate) {
       return res.status(400).json({ success: false, message: "Exam name and exam date are required." });
@@ -26426,7 +26770,7 @@ function registerStudentToolkitBackend(app) {
     });
   });
   app.delete("/api/toolkit/productivity/exams/:id", (req, res) => {
-    const userId = getAuthenticatedUserId5(req);
+    const userId = getAuthenticatedUserId6(req);
     const { id } = req.params;
     const db = loadDb20();
     const exam = db.exams.find((e) => e.id === id);
@@ -27083,16 +27427,18 @@ Use valid YYYY-MM-DD dates anchored to Today's Date (${payload.todayISO}), HH:MM
       message: `API endpoint not found: ${req.method} ${req.originalUrl}`
     });
   });
-  if (process.env.NODE_ENV !== "production") {
+  const distPath = path27.resolve(__dirname, "dist");
+  const hasDist = fs15.existsSync(path27.join(distPath, "index.html"));
+  const isProduction2 = process.env.NODE_ENV === "production" || hasDist;
+  if (!isProduction2) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, allowedHosts: true },
       appType: "spa"
     });
     app.use(vite.middlewares);
   } else {
     app.use("/src/assets/images", express.static(path27.resolve(__dirname, "src/assets/images")));
-    const distPath = path27.resolve(__dirname, "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path27.join(distPath, "index.html"));

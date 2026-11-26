@@ -734,17 +734,20 @@ Use valid YYYY-MM-DD dates anchored to Today's Date (${payload.todayISO}), HH:MM
   });
 
   // Vite dev middleware or static production build
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.resolve(__dirname, 'dist');
+  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isProduction = process.env.NODE_ENV === 'production' || hasDist;
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
     // Serve static workspace images in production for any persisted DB /src/assets/images/* URLs
     app.use('/src/assets/images', express.static(path.resolve(__dirname, 'src/assets/images')));
-    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

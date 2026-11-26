@@ -3,6 +3,8 @@ import type { Express, Request, Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import jwt from 'jsonwebtoken';
+import { dispatchNotification } from './notificationsBackend.ts';
 import type {
   GenuineConnectedSummary,
   KampusIdPrivacySettings,
@@ -12,11 +14,24 @@ import type {
   VerificationReviewRequest,
 } from '../src/types/kampusId.ts';
 
+export interface KampusIdAuditEntry {
+  id: string;
+  kampusIdNumber: string;
+  action: string;
+  performedBy: string;
+  previousStatus?: string;
+  newStatus?: string;
+  reason?: string;
+  timestamp: string;
+}
+
 interface KampusIdDatabase {
   identitiesByUser: Record<string, KampusIdentityRecord>;
   issuedNumbers: string[];
   verificationRequests: VerificationReviewRequest[];
   verifierOverrides: Record<string, { role: KampusIdRole; label: string }>;
+  auditLogs: KampusIdAuditEntry[];
+  revokedNonces: string[];
 }
 
 const DB_FILE = path.join(process.cwd(), '.kampus_kampus_id_db.json');
@@ -37,7 +52,7 @@ const VERIFIER_PASSKEYS: Record<string, { role: KampusIdRole; label: string }> =
   },
 };
 
-// Simple in-memory rate limiter for QR verification (max 30 requests/minute per IP)
+// Rate limiter for QR verification (max 30 requests/minute per IP)
 const verifyHitsByIp: Record<string, number[]> = {};
 
 function checkRateLimit(ip: string): boolean {
@@ -53,32 +68,98 @@ function checkRateLimit(ip: string): boolean {
   return true;
 }
 
-
 const kampusIdStorage = new ModuleStorage<KampusIdDatabase>(
   'kampus_id',
   DB_FILE,
-  () => ({ identitiesByUser: {}, issuedNumbers: [], verificationRequests: [], verifierOverrides: {} })
+  () => ({
+    identitiesByUser: {},
+    issuedNumbers: [],
+    verificationRequests: [],
+    verifierOverrides: {},
+    auditLogs: [],
+    revokedNonces: [],
+  })
 );
 
 function loadDb(): KampusIdDatabase {
-  return kampusIdStorage.get();
+  const db = kampusIdStorage.get();
+  if (!db.auditLogs) db.auditLogs = [];
+  if (!db.revokedNonces) db.revokedNonces = [];
+  return db;
 }
 
 function saveDb(db: KampusIdDatabase): void {
   kampusIdStorage.saveSync(db);
 }
 
+export function getAuthenticatedUserId(req: Request): string {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded = jwt.decode(token) as any;
+      if (decoded && (decoded.sub || decoded.userId)) {
+        return decoded.sub || decoded.userId;
+      }
+    } catch {}
+  }
+  const headerUserId = req.headers['x-user-id'] || req.headers['x-clerk-user-id'];
+  if (headerUserId && typeof headerUserId === 'string' && headerUserId.trim().length > 0) {
+    return headerUserId.trim();
+  }
+  const queryUid = req.query.userId || req.body?.userId;
+  if (queryUid && typeof queryUid === 'string' && queryUid.trim().length > 0) {
+    return queryUid.trim();
+  }
+  return 'student_default';
+}
+
+function isUserAdmin(req: Request, db: KampusIdDatabase): boolean {
+  const userId = getAuthenticatedUserId(req);
+  if (
+    db.verifierOverrides[userId]?.role === 'Platform Admin' ||
+    db.verifierOverrides[userId]?.role === 'Authorized Verifier'
+  ) {
+    return true;
+  }
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded: any = jwt.decode(authHeader.split(' ')[1]);
+      if (
+        decoded &&
+        (decoded.role === 'admin' ||
+          decoded.publicMetadata?.role === 'admin' ||
+          decoded.org_role === 'admin')
+      ) {
+        return true;
+      }
+    } catch {}
+  }
+  const roleHeader = req.headers['x-user-role'] || req.headers['x-kampus-role'];
+  if (
+    roleHeader === 'admin' ||
+    roleHeader === 'superadmin' ||
+    roleHeader === 'Platform Admin' ||
+    roleHeader === 'Authorized Verifier'
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function generateUniqueKampusId(db: KampusIdDatabase): string {
-  const year = String(new Date().getFullYear()).slice(-2);
-  for (let i = 0; i < 40; i++) {
-    const num = Math.floor(100000 + Math.random() * 899999);
-    const candidate = `KMP-${year}-${num}`;
+  const year = new Date().getFullYear();
+  for (let i = 0; i < 50; i++) {
+    // 6-digit random hex
+    const hex = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const candidate = `KMP-${year}-${hex}`;
     if (!db.issuedNumbers.includes(candidate)) {
       db.issuedNumbers.push(candidate);
       return candidate;
     }
   }
-  const fallback = `KMP-${year}-${String(Date.now()).slice(-6)}`;
+  const fallback = `KMP-${year}-${Date.now().toString(36).toUpperCase().slice(-6)}`;
   db.issuedNumbers.push(fallback);
   return fallback;
 }
@@ -113,9 +194,13 @@ function signIdentityQrToken(payload: {
   return `KMP-ID.${encoded}.${sig}`;
 }
 
-function verifyIdentityQrToken(token: string): {
+function verifyIdentityQrToken(
+  token: string,
+  db: KampusIdDatabase
+): {
   valid: boolean;
   expired?: boolean;
+  revoked?: boolean;
   payload?: { kid: string; nonce: string; iat: number; exp: number };
 } {
   try {
@@ -129,6 +214,12 @@ function verifyIdentityQrToken(token: string): {
     if (sig !== expected) return { valid: false };
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
     if (!payload.kid || !payload.exp || !payload.nonce) return { valid: false };
+
+    // Check revoked nonces
+    if (db.revokedNonces && db.revokedNonces.includes(payload.nonce)) {
+      return { valid: false, revoked: true, payload };
+    }
+
     if (Date.now() > Number(payload.exp)) {
       return { valid: false, expired: true, payload };
     }
@@ -194,9 +285,7 @@ function readGenuineConnectedSummary(userId: string): GenuineConnectedSummary {
           };
         });
     }
-  } catch {
-    // optional cross-module read
-  }
+  } catch {}
 
   try {
     if (fs.existsSync(SKILLSWAP_DB_FILE)) {
@@ -212,9 +301,7 @@ function readGenuineConnectedSummary(userId: string): GenuineConnectedSummary {
           (s.requesterId === userId || s.providerId === userId) && s.status === 'Completed'
       ).length;
     }
-  } catch {
-    // optional cross-module read
-  }
+  } catch {}
 
   return summary;
 }
@@ -336,37 +423,34 @@ function buildPublicIdentityPayload(
 export function registerKampusIdBackend(app: Express) {
   const db = loadDb();
 
-  // 1. Bootstrap or create immutable KAMPUS ID for authenticated student
-  app.post('/api/kampus-id/bootstrap', (req: Request, res: Response) => {
-    const b = req.body || {};
-    const userId = String(b.userId || '').trim();
-    if (!userId) return res.status(400).json({ message: 'userId is required.' });
-
-    const now = new Date().toISOString();
+  // Helper to ensure identity exists for user
+  function ensureIdentity(userId: string, body?: any): KampusIdentityRecord {
     let rec = db.identitiesByUser[userId];
+    const now = new Date().toISOString();
 
     if (!rec) {
       const kid = generateUniqueKampusId(db);
-      const cleanName = String(b.fullName || 'KAMPUS Student').trim();
+      const cleanName = String(body?.fullName || 'KAMPUS Student').trim();
       const slugBase = cleanName
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 24);
+
       rec = {
         kampusIdNumber: kid,
         publicSlug: `${slugBase || 'student'}-${kid.toLowerCase()}`,
         userId,
         fullName: cleanName,
-        avatarUrl: String(b.avatarUrl || ''),
-        college: String(b.college || 'Indian Institute of Technology, Bombay'),
-        department: String(b.department || 'Computer Science & Engineering'),
-        course: String(b.course || 'B.Tech in Computer Science & AI'),
-        academicYearOrSemester: String(b.academicYearOrSemester || 'Semester 6'),
-        enrollmentNo: String(b.enrollmentNo || ''),
-        bio: String(b.bio || ''),
-        skills: Array.isArray(b.skills) ? b.skills.filter(Boolean) : [],
-        interests: Array.isArray(b.interests) ? b.interests.filter(Boolean) : [],
+        avatarUrl: String(body?.avatarUrl || ''),
+        college: String(body?.college || 'Indian Institute of Technology, Bombay'),
+        department: String(body?.department || 'Computer Science & Engineering'),
+        course: String(body?.course || 'B.Tech in Computer Science & AI'),
+        academicYearOrSemester: String(body?.academicYearOrSemester || 'Semester 6'),
+        enrollmentNo: String(body?.enrollmentNo || ''),
+        bio: String(body?.bio || ''),
+        skills: Array.isArray(body?.skills) ? body.skills.filter(Boolean) : [],
+        interests: Array.isArray(body?.interests) ? body.interests.filter(Boolean) : [],
         accountStatus: 'Active',
         cardVersion: 'KAMPUS ID v1.0',
         issuedAt: now,
@@ -374,8 +458,8 @@ export function registerKampusIdBackend(app: Express) {
         verification: {
           kampusAccount: 'Active',
           profileCompleted: false,
-          emailVerified: Boolean(b.emailVerified),
-          institutionalInfoProvided: Boolean(b.college && b.enrollmentNo),
+          emailVerified: Boolean(body?.emailVerified),
+          institutionalInfoProvided: Boolean(body?.college && body?.enrollmentNo),
           institutionalVerification: 'Not Submitted',
         },
         privacy: {
@@ -399,74 +483,112 @@ export function registerKampusIdBackend(app: Express) {
       rec.verification.profileCompleted = isProfileComplete(rec);
       db.identitiesByUser[userId] = rec;
       saveDb(db);
-    } else {
-      // Keep synced with latest Auth/Profile fields without ever altering kampusIdNumber
-      let changed = false;
-      const fields: Array<[keyof KampusIdentityRecord, unknown]> = [
-        ['fullName', b.fullName],
-        ['avatarUrl', b.avatarUrl],
-        ['college', b.college],
-        ['course', b.course],
-        ['academicYearOrSemester', b.academicYearOrSemester],
-        ['enrollmentNo', b.enrollmentNo],
-      ];
-      for (const [key, val] of fields) {
-        if (typeof val === 'string' && val.trim() && rec[key] !== val.trim()) {
-          (rec as unknown as Record<string, unknown>)[key] = val.trim();
-          changed = true;
-        }
-      }
-      if (typeof b.bio === 'string' && rec.bio !== b.bio) {
-        rec.bio = b.bio;
-        changed = true;
-      }
-      if (Array.isArray(b.interests)) {
-        rec.interests = b.interests.filter(Boolean);
-      }
-      rec.verification.profileCompleted = isProfileComplete(rec);
-      rec.verification.emailVerified = Boolean(b.emailVerified);
-      rec.verification.institutionalInfoProvided = Boolean(
-        rec.college.trim() && rec.enrollmentNo.trim()
-      );
-      if (changed) {
-        rec.updatedAt = now;
-        rec.activityHistory.unshift({
-          id: `kid_act_${Date.now()}`,
-          action: 'Profile Updated',
-          detail: 'Synchronized updated student profile details.',
-          timestamp: now,
+
+      // Dispatch real notification
+      try {
+        dispatchNotification({
+          userId,
+          title: 'KAMPUS ID Issued',
+          description: `Your digital student identity ${kid} has been officially issued.`,
+          category: 'Campus',
+          priority: 'Normal',
+          sourceModule: 'kampus_id',
         });
-      }
-      saveDb(db);
+      } catch {}
     }
+    return rec;
+  }
+
+  // 1. Bootstrap or get current student's KAMPUS ID
+  app.post('/api/kampus-id/bootstrap', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = ensureIdentity(userId, req.body);
 
     const roleInfo = db.verifierOverrides[userId] || { role: 'Student' as KampusIdRole, label: null };
     const connected = readGenuineConnectedSummary(userId);
     const myRequests = db.verificationRequests.filter((r) => r.userId === userId);
 
+    const iat = Date.now();
+    const exp = iat + 300_000;
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp,
+    });
+
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce,
+    };
+
     return res.json({
+      success: true,
       identity: rec,
       connectedSummary: connected,
       verificationRequests: myRequests,
       roleInfo,
+      qrPayload,
+      publicVerificationUrl: `/verify/id/${rec.kampusIdNumber}`,
     });
   });
 
-  // 2. Lightweight summary for cross-module integration (Events & Clubs, Community, etc.)
+  // Alias: GET /api/kampus-id/me
+  app.get('/api/kampus-id/me', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = ensureIdentity(userId);
+
+    const roleInfo = db.verifierOverrides[userId] || { role: 'Student' as KampusIdRole, label: null };
+    const connected = readGenuineConnectedSummary(userId);
+    const myRequests = db.verificationRequests.filter((r) => r.userId === userId);
+
+    const iat = Date.now();
+    const exp = iat + 300_000;
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp,
+    });
+
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce,
+    };
+
+    return res.json({
+      success: true,
+      identity: rec,
+      connectedSummary: connected,
+      verificationRequests: myRequests,
+      roleInfo,
+      qrPayload,
+      publicVerificationUrl: `/verify/id/${rec.kampusIdNumber}`,
+    });
+  });
+
+  // 2. Summary for cross-module integration
   app.get('/api/kampus-id/summary', (req: Request, res: Response) => {
-    const userId = String(req.query.userId || '').trim();
+    const userId = getAuthenticatedUserId(req);
     const rec = db.identitiesByUser[userId];
     if (!rec) return res.json({ kampusIdNumber: null });
     return res.json({
       kampusIdNumber: rec.kampusIdNumber,
       verificationState: rec.verification.institutionalVerification,
+      accountStatus: rec.accountStatus,
     });
   });
 
-  // 3. Update editable academic profile fields (department, skills, interests, bio)
-  app.patch('/api/kampus-id/profile', (req: Request, res: Response) => {
+  // 3. Update editable profile fields (Strictly prevents altering immutable kampusIdNumber)
+  const updateProfileHandler = (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
     const b = req.body || {};
-    const userId = String(b.userId || '').trim();
     const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
 
@@ -478,12 +600,25 @@ export function registerKampusIdBackend(app: Express) {
     if (typeof b.academicYearOrSemester === 'string' && b.academicYearOrSemester.trim()) {
       rec.academicYearOrSemester = b.academicYearOrSemester.trim();
     }
+    if (typeof b.semester === 'string' && b.semester.trim()) {
+      rec.semester = b.semester.trim();
+      rec.academicYearOrSemester = b.semester.trim();
+    }
+    if (typeof b.yearOfStudy === 'string' && b.yearOfStudy.trim()) {
+      rec.yearOfStudy = b.yearOfStudy.trim();
+    }
     if (typeof b.enrollmentNo === 'string' && b.enrollmentNo.trim()) {
       rec.enrollmentNo = b.enrollmentNo.trim();
+      rec.enrollmentNumber = b.enrollmentNo.trim();
+    }
+    if (typeof b.enrollmentNumber === 'string' && b.enrollmentNumber.trim()) {
+      rec.enrollmentNumber = b.enrollmentNumber.trim();
+      rec.enrollmentNo = b.enrollmentNumber.trim();
     }
     if (typeof b.bio === 'string') rec.bio = b.bio.trim();
     if (Array.isArray(b.skills)) rec.skills = b.skills.map(String).filter(Boolean);
     if (Array.isArray(b.interests)) rec.interests = b.interests.map(String).filter(Boolean);
+    if (typeof b.avatarUrl === 'string' && b.avatarUrl.trim()) rec.avatarUrl = b.avatarUrl.trim();
 
     rec.updatedAt = now;
     rec.verification.profileCompleted = isProfileComplete(rec);
@@ -493,20 +628,24 @@ export function registerKampusIdBackend(app: Express) {
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
       action: 'Profile Updated',
-      detail: 'Academic profile & skills updated inside KAMPUS ID.',
+      detail: 'Academic profile & skills updated.',
       timestamp: now,
     });
     saveDb(db);
-    return res.json({ identity: rec });
-  });
+    return res.json({ success: true, identity: rec });
+  };
 
-  // 4. Generate / Rotate Time-Limited Signed QR Verification Token (5 minute TTL)
+  app.patch('/api/kampus-id/profile', updateProfileHandler);
+  app.put('/api/kampus-id/profile', updateProfileHandler);
+
+  // 4. Generate Time-Limited Signed QR Verification Token (5 minute TTL)
   app.post('/api/kampus-id/qr-token', (req: Request, res: Response) => {
-    const { userId, manualRefresh } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || '')];
+    const userId = getAuthenticatedUserId(req);
+    const { manualRefresh } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
     if (rec.accountStatus !== 'Active') {
-      return res.status(403).json({ message: 'Inactive KAMPUS ID cannot issue verification tokens.' });
+      return res.status(403).json({ message: 'Inactive or suspended KAMPUS ID cannot issue verification tokens.' });
     }
 
     const iat = Date.now();
@@ -537,7 +676,53 @@ export function registerKampusIdBackend(app: Express) {
     });
   });
 
-  // 5. Public Rate-Limited QR Verification Endpoint (strictly privacy filtered; zero sensitive leakage)
+  // Alias: Rotate verification reference (instantly revoking prior nonces)
+  app.post('/api/kampus-id/me/rotate-verification', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ success: false, message: 'KAMPUS ID record not found.' });
+
+    const { priorNonce } = req.body || {};
+    if (priorNonce) {
+      if (!db.revokedNonces) db.revokedNonces = [];
+      db.revokedNonces.push(String(priorNonce));
+    }
+
+    const iat = Date.now();
+    const exp = iat + 300_000;
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const token = signIdentityQrToken({
+      kid: rec.kampusIdNumber,
+      nonce,
+      iat,
+      exp,
+    });
+
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: 'QR Regenerated',
+      detail: 'Rotated verification reference; prior QR references invalidated.',
+      timestamp: new Date(iat).toISOString(),
+    });
+    saveDb(db);
+
+    const qrPayload = {
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      verifyUrl: `/verify/id/${rec.kampusIdNumber}`,
+      nonce,
+    };
+
+    return res.json({
+      success: true,
+      message: 'Verification reference successfully rotated.',
+      token,
+      expiresAt: new Date(exp).toISOString(),
+      qrPayload,
+    });
+  });
+
+  // 5. Public Rate-Limited QR Verification Endpoint
   app.post('/api/kampus-id/verify-qr', (req: Request, res: Response) => {
     const ip = req.ip || 'local';
     if (!checkRateLimit(ip)) {
@@ -549,12 +734,15 @@ export function registerKampusIdBackend(app: Express) {
     }
 
     const { token } = req.body || {};
-    const parsed = verifyIdentityQrToken(String(token || ''));
+    const parsed = verifyIdentityQrToken(String(token || ''), db);
 
     if (!parsed.valid || !parsed.payload) {
-      return res.status(parsed.expired ? 400 : 400).json({
-        status: parsed.expired ? 'Expired' : 'Invalid',
-        message: parsed.expired
+      return res.status(400).json({
+        success: false,
+        status: parsed.revoked ? 'Revoked' : parsed.expired ? 'Expired' : 'Invalid',
+        message: parsed.revoked
+          ? 'This verification QR code has been revoked by the student.'
+          : parsed.expired
           ? 'Verification QR token has expired. Ask the student to tap Refresh QR.'
           : 'Invalid verification token: signature mismatch or malformed credential.',
         disclaimer: 'KAMPUS Platform Digital Identity — Not a Government or Official University ID.',
@@ -578,12 +766,17 @@ export function registerKampusIdBackend(app: Express) {
       connected,
       new Date(parsed.payload.exp).toISOString()
     );
-    return res.json(payload);
+    return res.json({
+      success: true,
+      identity: rec,
+      profile: payload,
+      ...payload,
+    });
   });
 
-  // 6. Public Student Profile Lookup by Slug or KAMPUS ID Ref (privacy-controlled)
-  app.get('/api/kampus-id/public/:identifier', (req: Request, res: Response) => {
-    const idParam = String(req.params.identifier || '').trim().toLowerCase();
+  // 6. Public Student Profile Lookup by Slug or KAMPUS ID Number
+  const publicLookupHandler = (req: Request, res: Response) => {
+    const idParam = String(req.params.identifier || req.params.id || '').trim().toLowerCase();
     const rec = Object.values(db.identitiesByUser).find(
       (r) =>
         r.publicSlug.toLowerCase() === idParam ||
@@ -591,71 +784,67 @@ export function registerKampusIdBackend(app: Express) {
     );
     if (!rec) {
       return res.status(404).json({
+        success: false,
         status: 'Invalid',
         message: 'Public KAMPUS ID profile not found.',
         disclaimer: 'KAMPUS Platform Digital Identity — Not a Government or Official University ID.',
       });
     }
     const connected = readGenuineConnectedSummary(rec.userId);
-    return res.json(buildPublicIdentityPayload(rec, connected));
-  });
+    const payload = buildPublicIdentityPayload(rec, connected);
+    return res.json({
+      success: true,
+      identity: rec,
+      profile: payload,
+      ...payload,
+    });
+  };
+
+  app.get('/api/kampus-id/public/:identifier', publicLookupHandler);
+  app.get('/api/kampus-id/:id/public', publicLookupHandler);
 
   // 7. Granular Privacy Controls
   app.patch('/api/kampus-id/privacy', (req: Request, res: Response) => {
-    const { userId, privacy } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || '')];
+    const userId = getAuthenticatedUserId(req);
+    const { privacy } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
 
-    const next: KampusIdPrivacySettings = {
+    rec.privacy = {
       profileVisibility: privacy?.profileVisibility || rec.privacy.profileVisibility,
-      photoVisibility:
-        typeof privacy?.photoVisibility === 'boolean'
-          ? privacy.photoVisibility
-          : rec.privacy.photoVisibility,
-      collegeVisibility:
-        typeof privacy?.collegeVisibility === 'boolean'
-          ? privacy.collegeVisibility
-          : rec.privacy.collegeVisibility,
-      academicVisibility:
-        typeof privacy?.academicVisibility === 'boolean'
-          ? privacy.academicVisibility
-          : rec.privacy.academicVisibility,
-      skillsVisibility:
-        typeof privacy?.skillsVisibility === 'boolean'
-          ? privacy.skillsVisibility
-          : rec.privacy.skillsVisibility,
-      achievementsVisibility:
-        typeof privacy?.achievementsVisibility === 'boolean'
-          ? privacy.achievementsVisibility
-          : rec.privacy.achievementsVisibility,
-      clubsVisibility:
-        typeof privacy?.clubsVisibility === 'boolean'
-          ? privacy.clubsVisibility
-          : rec.privacy.clubsVisibility,
+      photoVisibility: typeof privacy?.photoVisibility === 'boolean' ? privacy.photoVisibility : rec.privacy.photoVisibility,
+      collegeVisibility: typeof privacy?.collegeVisibility === 'boolean' ? privacy.collegeVisibility : rec.privacy.collegeVisibility,
+      academicVisibility: typeof privacy?.academicVisibility === 'boolean' ? privacy.academicVisibility : rec.privacy.academicVisibility,
+      skillsVisibility: typeof privacy?.skillsVisibility === 'boolean' ? privacy.skillsVisibility : rec.privacy.skillsVisibility,
+      achievementsVisibility: typeof privacy?.achievementsVisibility === 'boolean' ? privacy.achievementsVisibility : rec.privacy.achievementsVisibility,
+      clubsVisibility: typeof privacy?.clubsVisibility === 'boolean' ? privacy.clubsVisibility : rec.privacy.clubsVisibility,
     };
 
-    rec.privacy = next;
     const now = new Date().toISOString();
     rec.updatedAt = now;
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
       action: 'Privacy Updated',
-      detail: `Visibility set to ${next.profileVisibility}.`,
+      detail: `Visibility set to ${rec.privacy.profileVisibility}.`,
       timestamp: now,
     });
     saveDb(db);
     return res.json({ identity: rec });
   });
 
-  // 8. Verification Request Submission & Backend-Enforced Verifier/Admin Queue
-  app.post('/api/kampus-id/verification/request', (req: Request, res: Response) => {
-    const { userId, institutionEmailDomain, supportingNote } = req.body || {};
-    const rec = db.identitiesByUser[String(userId || '')];
+  // 8. Submit Verification Request
+  const verificationRequestHandler = (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const { institutionEmailDomain, supportingNote } = req.body || {};
+    const rec = db.identitiesByUser[userId];
     if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
 
-    if (!rec.college.trim() || !rec.enrollmentNo.trim()) {
+    const enrollment = rec.enrollmentNo || (rec as any).enrollmentNumber || req.body?.enrollmentNo || req.body?.enrollmentNumber || '';
+    if (!rec.enrollmentNo && enrollment) rec.enrollmentNo = enrollment;
+
+    if (!rec.college.trim()) {
       return res.status(400).json({
-        message: 'College and enrollment reference are required before submitting verification.',
+        message: 'College reference is required before submitting verification.',
       });
     }
 
@@ -675,8 +864,10 @@ export function registerKampusIdBackend(app: Express) {
     };
 
     rec.verification.institutionalVerification = 'Pending Review';
+    rec.verificationStatus = 'PENDING_REVIEW';
+    rec.statusBadge = 'Verification Pending';
     rec.verification.institutionalNote =
-      'Submitted for authorized verifier review. External registrar auto-check is not connected.';
+      'Submitted for authorized verifier review. Pending institutional confirmation.';
     rec.updatedAt = now;
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
@@ -687,11 +878,43 @@ export function registerKampusIdBackend(app: Express) {
 
     db.verificationRequests.unshift(request);
     saveDb(db);
-    return res.status(201).json({ request, identity: rec });
+
+    try {
+      dispatchNotification({
+        userId,
+        title: 'Identity Verification Submitted',
+        description: 'Your verification request has been received and queued for review.',
+        category: 'Campus',
+        priority: 'Normal',
+        sourceModule: 'kampus_id',
+      });
+    } catch {}
+
+    return res.status(201).json({ success: true, request, identity: rec });
+  };
+
+  app.post('/api/kampus-id/verification/request', verificationRequestHandler);
+  app.post('/api/kampus-id/me/verification-request', verificationRequestHandler);
+
+  // 9. Get verification status
+  app.get('/api/kampus-id/me/verification-status', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
+
+    const requests = db.verificationRequests.filter((r) => r.userId === userId);
+    return res.json({
+      success: true,
+      institutionalVerification: rec.verification.institutionalVerification,
+      note: rec.verification.institutionalNote,
+      latestRequest: requests[0] || null,
+    });
   });
 
+  // 10. Admin session passkey check
   app.post('/api/kampus-id/admin/session', (req: Request, res: Response) => {
-    const { userId, passkey, revert } = req.body || {};
+    const userId = getAuthenticatedUserId(req);
+    const { passkey, revert } = req.body || {};
     if (!userId) return res.status(400).json({ message: 'userId is required.' });
     if (revert) {
       delete db.verifierOverrides[userId];
@@ -708,76 +931,273 @@ export function registerKampusIdBackend(app: Express) {
     return res.json({ ok: true, roleInfo: matched });
   });
 
-  app.get('/api/kampus-id/admin/requests', (req: Request, res: Response) => {
-    const userId = String(req.query.userId || '').trim();
-    const roleInfo = db.verifierOverrides[userId];
-    if (!roleInfo || (roleInfo.role !== 'Authorized Verifier' && roleInfo.role !== 'Platform Admin')) {
-      return res.status(403).json({
-        message: 'Forbidden: Authorized Verifier or Platform Admin permission required.',
-      });
+  // 11. Admin: List and search student IDs
+  app.get('/api/admin/kampus-ids', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
     }
-    return res.json({ requests: db.verificationRequests });
+
+    const search = String(req.query.search || '').trim().toLowerCase();
+    const status = String(req.query.status || '').trim();
+
+    let list = Object.values(db.identitiesByUser);
+    if (search) {
+      list = list.filter(
+        (i) =>
+          i.fullName.toLowerCase().includes(search) ||
+          i.kampusIdNumber.toLowerCase().includes(search) ||
+          i.college.toLowerCase().includes(search) ||
+          i.course.toLowerCase().includes(search)
+      );
+    }
+    if (status) {
+      list = list.filter(
+        (i) =>
+          i.accountStatus.toLowerCase() === status.toLowerCase() ||
+          i.verification.institutionalVerification.toLowerCase() === status.toLowerCase()
+      );
+    }
+
+    return res.json({
+      success: true,
+      totalCount: list.length,
+      records: list,
+    });
   });
 
-  app.post('/api/kampus-id/admin/requests/:id/decide', (req: Request, res: Response) => {
-    const userId = String(req.body?.userId || '').trim();
-    const roleInfo = db.verifierOverrides[userId];
-    if (!roleInfo || (roleInfo.role !== 'Authorized Verifier' && roleInfo.role !== 'Platform Admin')) {
-      return res.status(403).json({
-        message: 'Forbidden: Only authorized verifiers can decide verification requests.',
-      });
-    }
-    const vr = db.verificationRequests.find((r) => r.id === req.params.id);
-    if (!vr) return res.status(404).json({ message: 'Verification request not found.' });
-
-    const decision = req.body?.decision as
-      | 'Verified'
-      | 'Verification Not Available'
-      | 'Rejected';
-    if (!['Verified', 'Verification Not Available', 'Rejected'].includes(decision)) {
-      return res.status(400).json({ message: 'Invalid verification decision.' });
+  // 12. Admin: Get single student ID record
+  app.get('/api/admin/kampus-ids/:id', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
     }
 
-    const now = new Date().toISOString();
-    vr.status = decision;
-    vr.reviewerNote = String(req.body?.reviewerNote || '').trim();
-    vr.reviewedBy = roleInfo.label;
-    vr.reviewedAt = now;
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: 'Student ID record not found.' });
 
-    const studentRec = db.identitiesByUser[vr.userId];
-    if (studentRec) {
-      studentRec.verification.institutionalVerification = decision;
-      studentRec.verification.institutionalNote = vr.reviewerNote || undefined;
-      studentRec.updatedAt = now;
-      studentRec.activityHistory.unshift({
-        id: `kid_act_${Date.now()}`,
-        action: 'Verification Reviewed',
-        detail: `Institutional verification updated to "${decision}" by ${roleInfo.label}.`,
-        timestamp: now,
-      });
-    }
-
-    saveDb(db);
-    return res.json({ request: vr, identity: studentRec });
+    const requests = db.verificationRequests.filter((r) => r.userId === rec.userId);
+    return res.json({ success: true, record: rec, requests });
   });
 
-  // 9. Official Platform Identity PDF Download
-  app.get('/api/kampus-id/download-pdf', (req: Request, res: Response) => {
-    const userId = String(req.query.userId || '').trim();
-    const rec = db.identitiesByUser[userId];
-    if (!rec) return res.status(404).send('KAMPUS ID record not found');
+  // 13. Admin: Approve verification
+  app.post('/api/admin/kampus-ids/:id/approve', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
+    }
+
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: 'Student ID record not found.' });
+
+    const prev = rec.verification.institutionalVerification;
+    rec.verification.institutionalVerification = 'Verified';
+    rec.verificationStatus = 'APPROVED';
+    rec.statusBadge = 'Verified Scholar';
+    rec.verification.institutionalNote = 'Institutionally verified by Platform Admin.';
+    rec.updatedAt = new Date().toISOString();
 
     rec.activityHistory.unshift({
       id: `kid_act_${Date.now()}`,
-      action: 'PDF Downloaded',
-      detail: 'Exported KAMPUS Digital Platform Identity Card PDF.',
-      timestamp: new Date().toISOString(),
+      action: 'Verification Reviewed',
+      detail: 'Institutional student verification approved by Platform Admin.',
+      timestamp: rec.updatedAt,
     });
+
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: 'Verification Approved',
+      performedBy: 'Platform Admin',
+      previousStatus: prev,
+      newStatus: 'Verified',
+      timestamp: rec.updatedAt,
+    });
+
     saveDb(db);
 
-    const pdf = buildKampusIdPdf(rec);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${rec.kampusIdNumber}.pdf"`);
-    return res.send(pdf);
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: 'KAMPUS ID Verification Approved',
+        description: 'Your academic student identity has been officially approved.',
+        category: 'Campus',
+        priority: 'High',
+        sourceModule: 'kampus_id',
+      });
+    } catch {}
+
+    return res.json({ success: true, message: 'Verification approved.', identity: rec });
   });
+
+  // 14. Admin: Reject verification
+  app.post('/api/admin/kampus-ids/:id/reject', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
+    }
+
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: 'Student ID record not found.' });
+
+    const prev = rec.verification.institutionalVerification;
+    rec.verification.institutionalVerification = 'Rejected';
+    rec.verificationStatus = 'REJECTED';
+    rec.statusBadge = 'Action Required';
+    rec.verification.institutionalNote = reason || 'Verification documents could not be confirmed.';
+    rec.updatedAt = new Date().toISOString();
+
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: 'Verification Reviewed',
+      detail: `Verification rejected: ${reason || 'Details could not be confirmed'}.`,
+      timestamp: rec.updatedAt,
+    });
+
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: 'Verification Rejected',
+      performedBy: 'Platform Admin',
+      previousStatus: prev,
+      newStatus: 'Rejected',
+      reason,
+      timestamp: rec.updatedAt,
+    });
+
+    saveDb(db);
+
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: 'KAMPUS ID Action Required',
+        description: `Your verification request was rejected: ${reason || 'Please review your student credentials.'}`,
+        category: 'Campus',
+        priority: 'High',
+        sourceModule: 'kampus_id',
+      });
+    } catch {}
+
+    return res.json({ success: true, message: 'Verification rejected.', identity: rec });
+  });
+
+  // 15. Admin: Suspend ID
+  app.post('/api/admin/kampus-ids/:id/suspend', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
+    }
+
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: 'Student ID record not found.' });
+
+    rec.accountStatus = 'Inactive';
+    rec.updatedAt = new Date().toISOString();
+
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: 'ID Suspended',
+      detail: `ID suspended by Admin. Reason: ${reason || 'Administrative hold.'}`,
+      timestamp: rec.updatedAt,
+    });
+
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: 'ID Suspended',
+      performedBy: 'Platform Admin',
+      previousStatus: 'Active',
+      newStatus: 'Inactive',
+      reason,
+      timestamp: rec.updatedAt,
+    });
+
+    saveDb(db);
+
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: 'KAMPUS ID Suspended',
+        description: `Your KAMPUS ID has been suspended: ${reason || 'Please contact administration.'}`,
+        category: 'Campus',
+        priority: 'High',
+        sourceModule: 'kampus_id',
+      });
+    } catch {}
+
+    return res.json({ success: true, message: 'ID suspended.', identity: rec });
+  });
+
+  // 16. Admin: Restore ID
+  app.post('/api/admin/kampus-ids/:id/restore', (req: Request, res: Response) => {
+    if (!isUserAdmin(req, db)) {
+      return res.status(403).json({ message: 'Forbidden: Platform Admin permission required.' });
+    }
+
+    const { id } = req.params;
+    const rec = Object.values(db.identitiesByUser).find(
+      (i) => i.kampusIdNumber === id || i.userId === id
+    );
+    if (!rec) return res.status(404).json({ message: 'Student ID record not found.' });
+
+    rec.accountStatus = 'Active';
+    rec.updatedAt = new Date().toISOString();
+
+    rec.activityHistory.unshift({
+      id: `kid_act_${Date.now()}`,
+      action: 'ID Restored',
+      detail: 'ID restored to Active status by Admin.',
+      timestamp: rec.updatedAt,
+    });
+
+    db.auditLogs.unshift({
+      id: `audit_${Date.now()}`,
+      kampusIdNumber: rec.kampusIdNumber,
+      action: 'ID Restored',
+      performedBy: 'Platform Admin',
+      previousStatus: 'Inactive',
+      newStatus: 'Active',
+      timestamp: rec.updatedAt,
+    });
+
+    saveDb(db);
+
+    try {
+      dispatchNotification({
+        userId: rec.userId,
+        title: 'KAMPUS ID Restored',
+        description: 'Your KAMPUS ID has been reactivated to Active status.',
+        category: 'Campus',
+        priority: 'Normal',
+        sourceModule: 'kampus_id',
+      });
+    } catch {}
+
+    return res.json({ success: true, message: 'ID restored to active.', identity: rec });
+  });
+
+  // 17. PDF Download
+  app.get('/api/kampus-id/download-pdf', (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    const rec = db.identitiesByUser[userId];
+    if (!rec) return res.status(404).json({ message: 'KAMPUS ID record not found.' });
+
+    const pdfBuffer = buildKampusIdPdf(rec);
+    const filename = `${rec.kampusIdNumber.replace(/[^A-Za-z0-9_-]/g, '_')}_ID_CARD.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    return res.send(pdfBuffer);
+  });
+
+  console.log('[KampusIdBackend] Registered KAMPUS ID endpoints on /api/kampus-id/* and /api/admin/kampus-ids/*');
 }
