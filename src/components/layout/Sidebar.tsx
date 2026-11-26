@@ -28,6 +28,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Flame,
+  Wrench,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -151,6 +152,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onOpenAi }) => {
       icon: ShieldCheck,
       basePath: '/tools',
       items: [
+        { label: 'Student Toolkit', path: '/tools/toolkit', icon: Wrench, badge: 'PRO' },
         { label: 'Digital Locker', path: '/tools/digital-locker', icon: ShieldCheck },
         { label: 'KAMPUS Rewards', path: '/tools/rewards', icon: Gift },
         { label: 'KAMPUS Planner', path: '/tools/planner', icon: Clock },

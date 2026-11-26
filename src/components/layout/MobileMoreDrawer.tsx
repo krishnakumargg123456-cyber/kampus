@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { X, Briefcase, ShoppingBag, ShieldCheck, Gift, Clock, Bell, User, Settings, Sparkles, LogOut, ChevronRight } from 'lucide-react';
+import { X, Briefcase, ShoppingBag, ShieldCheck, Gift, Clock, Bell, User, Settings, Sparkles, LogOut, ChevronRight, Wrench } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 interface MobileMoreDrawerProps {
@@ -24,6 +24,7 @@ export const MobileMoreDrawer: React.FC<MobileMoreDrawerProps> = ({ isOpen, onCl
     {
       title: 'Student Tools',
       items: [
+        { label: 'Student Toolkit (Calculators & Tools)', path: '/tools/toolkit', icon: Wrench },
         { label: 'Digital Locker (Transcripts & ID)', path: '/tools/digital-locker', icon: ShieldCheck },
         { label: 'KAMPUS Rewards (Earn & Redeem)', path: '/tools/rewards', icon: Gift },
         { label: 'KAMPUS Planner (Timetable & Safe Zone)', path: '/tools/planner', icon: Clock },

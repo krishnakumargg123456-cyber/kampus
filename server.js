@@ -3,7 +3,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { createServer as createHttpServer } from "http";
-import path26 from "path";
+import path27 from "path";
 import fs15 from "fs";
 import { fileURLToPath } from "url";
 import { GoogleGenAI as GoogleGenAI2, Type } from "@google/genai";
@@ -25796,9 +25796,659 @@ function registerCampusLifeBackend(app) {
   console.log("[CampusLifeBackend] Registered Campus Life endpoints on /api/campus-life/*");
 }
 
+// server/studentToolkitBackend.ts
+import crypto17 from "crypto";
+import path26 from "path";
+import jwt7 from "jsonwebtoken";
+var DB_PATH16 = path26.join(process.cwd(), ".kampus_toolkit_db.json");
+var DEFAULT_TOOLS = [
+  // Academic Calculators
+  {
+    id: "scientific-calc",
+    name: "Scientific Calculator",
+    category: "calculators",
+    description: "Advanced calculator with trigonometric, logarithmic, square root, exponential, brackets & history.",
+    icon: "Calculator",
+    keywords: ["math", "scientific", "trigonometry", "log", "arithmetic", "algebra", "sin", "cos", "tan"],
+    featured: true
+  },
+  {
+    id: "cgpa-calc",
+    name: "CGPA Calculator",
+    category: "calculators",
+    description: "Calculate cumulative grade point average across semesters with configurable credit weightings.",
+    icon: "GraduationCap",
+    keywords: ["cgpa", "grades", "semester", "university", "credits", "academic", "score"],
+    featured: true
+  },
+  {
+    id: "sgpa-calc",
+    name: "SGPA Calculator",
+    category: "calculators",
+    description: "Calculate semester grade point average with individual subject credits and grade points.",
+    icon: "Award",
+    keywords: ["sgpa", "semester", "grade point", "credits", "marks", "academic"]
+  },
+  {
+    id: "percentage-calc",
+    name: "Percentage & Marks Calculator",
+    category: "calculators",
+    description: "Calculate percentages, marks percentages, percentage increases/decreases, and difference.",
+    icon: "Percent",
+    keywords: ["percentage", "marks", "fraction", "discount", "increase", "ratio"]
+  },
+  {
+    id: "attendance-calc",
+    name: "Attendance & Safe-Zone Calculator",
+    category: "calculators",
+    description: "Check attendance percentage, required classes to reach 75%/85%, and safe skippable classes.",
+    icon: "CalendarCheck",
+    keywords: ["attendance", "bunk", "safe zone", "classes", "lectures", "shortage"],
+    featured: true
+  },
+  // Student Productivity
+  {
+    id: "pomodoro-timer",
+    name: "Pomodoro Focus Timer",
+    category: "productivity",
+    description: "25-minute deep focus sessions with smart short/long breaks and study cycle tracking.",
+    icon: "Timer",
+    keywords: ["pomodoro", "focus", "timer", "study session", "productivity", "deep work"],
+    featured: true
+  },
+  {
+    id: "todo-list",
+    name: "Academic To-Do & Tasks",
+    category: "productivity",
+    description: "Task management with priority badges, course tags, due dates, and completion status.",
+    icon: "CheckSquare",
+    keywords: ["todo", "tasks", "checklist", "homework", "priority", "reminders"]
+  },
+  {
+    id: "study-timer",
+    name: "Subject Study Stopwatch",
+    category: "productivity",
+    description: "Track dedicated study time per subject with live stopwatch and daily study summaries.",
+    icon: "Clock",
+    keywords: ["stopwatch", "study time", "tracker", "hours", "subject log"]
+  },
+  {
+    id: "timetable-generator",
+    name: "Class Timetable & Schedule",
+    category: "productivity",
+    description: "Weekly schedule planner with room numbers, faculty tags, and slot collision detection.",
+    icon: "Calendar",
+    keywords: ["timetable", "schedule", "routine", "classes", "lectures", "slots"]
+  },
+  {
+    id: "exam-countdown",
+    name: "Exam Countdown",
+    category: "productivity",
+    description: "Days remaining countdowns for mid-terms, end-sems, practicals, and competitive exams.",
+    icon: "Hourglass",
+    keywords: ["exam", "countdown", "finals", "midterm", "dates", "test"]
+  },
+  {
+    id: "quick-notes",
+    name: "Quick Notes & Scratchpad",
+    category: "productivity",
+    description: "Fast auto-saving scratchpad for lecture pointers, formulas, and brainstormed ideas.",
+    icon: "FileText",
+    keywords: ["notes", "scratchpad", "memo", "quick note", "formulas", "draft"]
+  },
+  // Text & Document Utilities
+  {
+    id: "word-counter",
+    name: "Word & Character Counter",
+    category: "documents",
+    description: "Count words, characters with/without spaces, sentences, paragraphs, and reading duration.",
+    icon: "AlignLeft",
+    keywords: ["words", "characters", "count", "essay", "sentences", "reading time"]
+  },
+  {
+    id: "case-converter",
+    name: "Text Case Converter",
+    category: "documents",
+    description: "Transform text to UPPERCASE, lowercase, Title Case, Sentence case, camelCase, and snake_case.",
+    icon: "Type",
+    keywords: ["case", "uppercase", "lowercase", "titlecase", "transform", "capitalize"]
+  },
+  {
+    id: "text-cleaner",
+    name: "Text Cleaner & Whitespace Stripper",
+    category: "documents",
+    description: "Remove redundant spaces, strip consecutive blank lines, clean tabs, and normalize formatting.",
+    icon: "Sparkles",
+    keywords: ["clean", "spaces", "trim", "whitespace", "formatting", "normalize"]
+  },
+  {
+    id: "text-compare",
+    name: "Text Compare & Diff Checker",
+    category: "documents",
+    description: "Side-by-side textual diff highlighter showing added, modified, and removed lines.",
+    icon: "GitCompare",
+    keywords: ["diff", "compare", "text compare", "changes", "revisions", "duplicate check"]
+  },
+  {
+    id: "qr-generator",
+    name: "QR Code Generator",
+    category: "documents",
+    description: "Generate high-resolution scannable QR codes for web links, campus notices, and Wi-Fi credentials.",
+    icon: "QrCode",
+    keywords: ["qr", "qrcode", "barcode", "generator", "link", "download qr"],
+    featured: true
+  },
+  {
+    id: "image-to-pdf",
+    name: "Images to PDF Compiler",
+    category: "documents",
+    description: "Reorder captured photo notes and compile them into a single clean PDF document.",
+    icon: "FileImage",
+    keywords: ["pdf", "images to pdf", "convert", "scan", "notes to pdf"]
+  },
+  {
+    id: "pdf-utilities",
+    name: "PDF Page Extractor & Merge Tools",
+    category: "documents",
+    description: "Preview, merge study guides, and split or extract selected pages from lecture slides.",
+    icon: "FileSpreadsheet",
+    keywords: ["pdf", "merge pdf", "split pdf", "extract pages", "slides"]
+  },
+  // Programming & Technical Utilities
+  {
+    id: "binary-converter",
+    name: "Binary & Bitwise Converter",
+    category: "programming",
+    description: "Live bidirectional conversion between Decimal and Binary representations with validation.",
+    icon: "Binary",
+    keywords: ["binary", "decimal", "bits", "base2", "twos complement", "programming"]
+  },
+  {
+    id: "number-base-converter",
+    name: "Multi-Base Number Converter",
+    category: "programming",
+    description: "Convert values instantaneously across Decimal (Base 10), Binary (2), Octal (8), and Hex (16).",
+    icon: "Cpu",
+    keywords: ["hex", "octal", "binary", "decimal", "radix", "base converter"]
+  },
+  {
+    id: "unit-converter",
+    name: "Universal Unit Converter",
+    category: "programming",
+    description: "Accurate scientific conversion for Length, Mass, Temperature, Time, Speed, and Frequency.",
+    icon: "Compass",
+    keywords: ["unit", "converter", "metric", "imperial", "length", "weight", "temperature"]
+  },
+  {
+    id: "data-size-converter",
+    name: "Digital Data Size Converter",
+    category: "programming",
+    description: "Convert storage capacity across Bytes, KB, MB, GB, TB, and PB in Decimal (1000) & Binary (1024).",
+    icon: "HardDrive",
+    keywords: ["bytes", "kb", "mb", "gb", "tb", "data size", "storage"]
+  },
+  {
+    id: "password-generator",
+    name: "Secure Password Generator",
+    category: "programming",
+    description: "Generate high-entropy cryptographically strong passwords locally with zero server transmission.",
+    icon: "Key",
+    keywords: ["password", "generator", "security", "crypto", "random", "pin"]
+  },
+  {
+    id: "color-converter",
+    name: "HEX / RGB / HSL Color Converter",
+    category: "programming",
+    description: "Live color picker and converter across HEX, RGB, HSL and CSS formats with swatch previews.",
+    icon: "Palette",
+    keywords: ["color", "hex", "rgb", "hsl", "css", "design", "palette"]
+  },
+  {
+    id: "code-formatter",
+    name: "Code Beautifier & JSON Validator",
+    category: "programming",
+    description: "Format, indent, and validate JSON data structures, HTML, CSS, and JavaScript snippets.",
+    icon: "Code2",
+    keywords: ["code", "format", "json", "beautify", "validate", "indent"]
+  },
+  // College & Student Utilities
+  {
+    id: "age-calculator",
+    name: "Age & Milestone Calculator",
+    category: "college",
+    description: "Exact age in years, months, days, total hours lived, and countdown to your next birthday.",
+    icon: "Cake",
+    keywords: ["age", "birthday", "date of birth", "calendar", "years", "milestone"]
+  },
+  {
+    id: "date-difference",
+    name: "Date Difference & Working Days",
+    category: "college",
+    description: "Calculate exact elapsed days, calendar weeks, and business days between any two dates.",
+    icon: "CalendarRange",
+    keywords: ["date difference", "days between", "duration", "working days", "semester length"]
+  },
+  {
+    id: "marks-grade-calc",
+    name: "Marks & Letter Grade Converter",
+    category: "college",
+    description: "Convert percentage marks into standard university 10-point grades (O, A+, A, B+, B, C, F).",
+    icon: "FileCheck",
+    keywords: ["grades", "marks", "scale", "letter grade", "pass criteria", "university"]
+  },
+  {
+    id: "assignment-tracker",
+    name: "Assignment Deadline Tracker",
+    category: "college",
+    description: "Track lab submissions, project reports, and milestones with urgency alerts.",
+    icon: "Bookmark",
+    keywords: ["assignment", "deadline", "submission", "project", "lab report"]
+  }
+];
+function createSeedDatabase12() {
+  return {
+    tools: DEFAULT_TOOLS,
+    favorites: [],
+    history: [],
+    preferencesByUser: {},
+    tasks: [],
+    timetable: [],
+    exams: [],
+    quickNotes: [],
+    pomodoroStatsByUser: {}
+  };
+}
+var toolkitStorage = new ModuleStorage(
+  "student_toolkit",
+  DB_PATH16,
+  () => createSeedDatabase12()
+);
+function loadDb20() {
+  const db = toolkitStorage.get();
+  if (!db.tools || db.tools.length < DEFAULT_TOOLS.length) {
+    db.tools = DEFAULT_TOOLS;
+    toolkitStorage.saveSync(db);
+  }
+  return db;
+}
+function saveDb20(db) {
+  toolkitStorage.saveSync(db);
+}
+function getAuthenticatedUserId5(req) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.split(" ")[1];
+    try {
+      const decoded = jwt7.decode(token);
+      if (decoded && (decoded.sub || decoded.userId)) {
+        return decoded.sub || decoded.userId;
+      }
+    } catch {
+    }
+  }
+  const headerUserId = req.headers["x-user-id"] || req.headers["x-clerk-user-id"];
+  if (headerUserId && typeof headerUserId === "string" && headerUserId.trim().length > 0) {
+    return headerUserId.trim();
+  }
+  const queryUid = req.query.userId || req.body?.userId;
+  if (queryUid && typeof queryUid === "string" && queryUid.trim().length > 0) {
+    return queryUid.trim();
+  }
+  return "student_default";
+}
+function registerStudentToolkitBackend(app) {
+  app.get("/api/toolkit/tools", (_req, res) => {
+    const db = loadDb20();
+    return res.json({
+      success: true,
+      data: db.tools,
+      totalCount: db.tools.length
+    });
+  });
+  app.get("/api/toolkit/favorites", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const db = loadDb20();
+    const userFavorites = db.favorites.filter((f) => f.userId === userId).map((f) => f.toolId);
+    return res.json({
+      success: true,
+      favorites: userFavorites
+    });
+  });
+  app.post("/api/toolkit/favorites", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { toolId } = req.body || {};
+    if (!toolId || typeof toolId !== "string") {
+      return res.status(400).json({ success: false, message: "Invalid toolId provided." });
+    }
+    const db = loadDb20();
+    const existing = db.favorites.find((f) => f.userId === userId && f.toolId === toolId);
+    if (!existing) {
+      db.favorites.push({
+        id: `fav_${crypto17.randomUUID()}`,
+        userId,
+        toolId,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      saveDb20(db);
+    }
+    const updatedFavorites = db.favorites.filter((f) => f.userId === userId).map((f) => f.toolId);
+    return res.json({
+      success: true,
+      message: "Tool added to favorites.",
+      favorites: updatedFavorites
+    });
+  });
+  app.delete("/api/toolkit/favorites/:toolId", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { toolId } = req.params;
+    const db = loadDb20();
+    db.favorites = db.favorites.filter((f) => !(f.userId === userId && f.toolId === toolId));
+    saveDb20(db);
+    const updatedFavorites = db.favorites.filter((f) => f.userId === userId).map((f) => f.toolId);
+    return res.json({
+      success: true,
+      message: "Tool removed from favorites.",
+      favorites: updatedFavorites
+    });
+  });
+  app.get("/api/toolkit/history", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const limit = Math.min(50, parseInt(String(req.query.limit || "15"), 10) || 15);
+    const db = loadDb20();
+    const userHistory = db.history.filter((h) => h.userId === userId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, limit);
+    return res.json({
+      success: true,
+      history: userHistory
+    });
+  });
+  app.post("/api/toolkit/history", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { toolId, actionSummary } = req.body || {};
+    if (!toolId || typeof toolId !== "string") {
+      return res.status(400).json({ success: false, message: "Valid toolId is required." });
+    }
+    const db = loadDb20();
+    const toolMeta = db.tools.find((t) => t.id === toolId);
+    const toolName = toolMeta ? toolMeta.name : toolId;
+    const entry = {
+      id: `hist_${crypto17.randomUUID()}`,
+      userId,
+      toolId,
+      toolName,
+      actionSummary: typeof actionSummary === "string" ? actionSummary.slice(0, 120) : void 0,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    db.history.unshift(entry);
+    const otherUsers = db.history.filter((h) => h.userId !== userId);
+    const thisUser = db.history.filter((h) => h.userId === userId).slice(0, 100);
+    db.history = [...thisUser, ...otherUsers];
+    saveDb20(db);
+    return res.json({
+      success: true,
+      entry
+    });
+  });
+  app.delete("/api/toolkit/history", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const entryId = req.query.id;
+    const db = loadDb20();
+    if (entryId) {
+      db.history = db.history.filter((h) => !(h.userId === userId && h.id === entryId));
+    } else {
+      db.history = db.history.filter((h) => h.userId !== userId);
+    }
+    saveDb20(db);
+    return res.json({
+      success: true,
+      message: entryId ? "History item removed." : "All usage history cleared."
+    });
+  });
+  app.get("/api/toolkit/preferences", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const db = loadDb20();
+    const prefs = db.preferencesByUser[userId] || {
+      calculatorAngleMode: "deg",
+      defaultGradingScale: "10-point",
+      attendanceTargetPercent: 75,
+      pomodoroWorkMinutes: 25,
+      pomodoroBreakMinutes: 5,
+      pomodoroLongBreakMinutes: 15,
+      preferredTheme: "system"
+    };
+    return res.json({
+      success: true,
+      preferences: prefs
+    });
+  });
+  app.put("/api/toolkit/preferences", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const updates = req.body || {};
+    const db = loadDb20();
+    const existing = db.preferencesByUser[userId] || {};
+    db.preferencesByUser[userId] = {
+      ...existing,
+      ...updates
+    };
+    saveDb20(db);
+    return res.json({
+      success: true,
+      message: "Preferences updated successfully.",
+      preferences: db.preferencesByUser[userId]
+    });
+  });
+  app.get("/api/toolkit/productivity/bootstrap", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const db = loadDb20();
+    const tasks = db.tasks.filter((t) => t.userId === userId);
+    const timetable = db.timetable.filter((t) => t.userId === userId);
+    const exams = db.exams.filter((e) => e.userId === userId);
+    const quickNotes = db.quickNotes.filter((n) => n.userId === userId);
+    const pomodoroStats = db.pomodoroStatsByUser[userId] || {
+      totalSessionsCompleted: 0,
+      totalFocusMinutes: 0,
+      lastActiveDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0]
+    };
+    return res.json({
+      success: true,
+      data: {
+        tasks,
+        timetable,
+        exams,
+        quickNotes,
+        pomodoroStats
+      }
+    });
+  });
+  app.post("/api/toolkit/productivity/tasks", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { title, subject, priority, dueDate, completed } = req.body || {};
+    if (!title || typeof title !== "string" || !title.trim()) {
+      return res.status(400).json({ success: false, message: "Task title is required." });
+    }
+    const db = loadDb20();
+    const newTask = {
+      id: `task_${crypto17.randomUUID()}`,
+      userId,
+      title: title.trim(),
+      subject: (subject || "General").trim(),
+      priority: ["low", "medium", "high"].includes(priority) ? priority : "medium",
+      dueDate: dueDate || void 0,
+      completed: Boolean(completed),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    db.tasks.unshift(newTask);
+    saveDb20(db);
+    return res.status(201).json({
+      success: true,
+      task: newTask
+    });
+  });
+  app.put("/api/toolkit/productivity/tasks/:id", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { id } = req.params;
+    const updates = req.body || {};
+    const db = loadDb20();
+    const taskIndex = db.tasks.findIndex((t) => t.id === id);
+    if (taskIndex === -1) {
+      return res.status(404).json({ success: false, message: "Task not found." });
+    }
+    if (db.tasks[taskIndex].userId !== userId) {
+      return res.status(403).json({ success: false, message: "Access denied: Cannot modify another student's task." });
+    }
+    db.tasks[taskIndex] = {
+      ...db.tasks[taskIndex],
+      ...updates,
+      userId,
+      // guarantee ownership cannot be forged
+      id
+    };
+    saveDb20(db);
+    return res.json({
+      success: true,
+      task: db.tasks[taskIndex]
+    });
+  });
+  app.delete("/api/toolkit/productivity/tasks/:id", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { id } = req.params;
+    const db = loadDb20();
+    const task = db.tasks.find((t) => t.id === id);
+    if (!task) {
+      return res.status(404).json({ success: false, message: "Task not found." });
+    }
+    if (task.userId !== userId) {
+      return res.status(403).json({ success: false, message: "Access denied: Cannot delete another student's task." });
+    }
+    db.tasks = db.tasks.filter((t) => t.id !== id);
+    saveDb20(db);
+    return res.json({
+      success: true,
+      message: "Task deleted successfully."
+    });
+  });
+  app.post("/api/toolkit/productivity/pomodoro/complete", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { focusMinutes } = req.body || {};
+    const minutes = Math.max(1, Math.min(180, parseInt(String(focusMinutes || "25"), 10) || 25));
+    const db = loadDb20();
+    const existing = db.pomodoroStatsByUser[userId] || {
+      totalSessionsCompleted: 0,
+      totalFocusMinutes: 0,
+      lastActiveDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0]
+    };
+    existing.totalSessionsCompleted += 1;
+    existing.totalFocusMinutes += minutes;
+    existing.lastActiveDate = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+    db.pomodoroStatsByUser[userId] = existing;
+    saveDb20(db);
+    return res.json({
+      success: true,
+      stats: existing
+    });
+  });
+  app.post("/api/toolkit/productivity/notes", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { id, title, content, category, isPinned } = req.body || {};
+    const db = loadDb20();
+    if (id) {
+      const idx = db.quickNotes.findIndex((n) => n.id === id);
+      if (idx !== -1) {
+        if (db.quickNotes[idx].userId !== userId) {
+          return res.status(403).json({ success: false, message: "Access denied: Cannot edit another student's note." });
+        }
+        db.quickNotes[idx] = {
+          ...db.quickNotes[idx],
+          title: title ?? db.quickNotes[idx].title,
+          content: content ?? db.quickNotes[idx].content,
+          category: category ?? db.quickNotes[idx].category,
+          isPinned: isPinned !== void 0 ? Boolean(isPinned) : db.quickNotes[idx].isPinned,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        saveDb20(db);
+        return res.json({ success: true, note: db.quickNotes[idx] });
+      }
+    }
+    const newNote = {
+      id: `note_${crypto17.randomUUID()}`,
+      userId,
+      title: (title || "Untitled Note").trim(),
+      content: content || "",
+      category: category || "General",
+      isPinned: Boolean(isPinned),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    db.quickNotes.unshift(newNote);
+    saveDb20(db);
+    return res.status(201).json({
+      success: true,
+      note: newNote
+    });
+  });
+  app.delete("/api/toolkit/productivity/notes/:id", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { id } = req.params;
+    const db = loadDb20();
+    const note = db.quickNotes.find((n) => n.id === id);
+    if (!note) {
+      return res.status(404).json({ success: false, message: "Note not found." });
+    }
+    if (note.userId !== userId) {
+      return res.status(403).json({ success: false, message: "Access denied: Cannot delete another student's note." });
+    }
+    db.quickNotes = db.quickNotes.filter((n) => n.id !== id);
+    saveDb20(db);
+    return res.json({
+      success: true,
+      message: "Note deleted successfully."
+    });
+  });
+  app.post("/api/toolkit/productivity/exams", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { examName, subject, examDate, room } = req.body || {};
+    if (!examName || !examDate) {
+      return res.status(400).json({ success: false, message: "Exam name and exam date are required." });
+    }
+    const db = loadDb20();
+    const newExam = {
+      id: `exam_${crypto17.randomUUID()}`,
+      userId,
+      examName: examName.trim(),
+      subject: (subject || "General").trim(),
+      examDate: examDate.trim(),
+      room: room ? room.trim() : void 0,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    db.exams.push(newExam);
+    saveDb20(db);
+    return res.status(201).json({
+      success: true,
+      exam: newExam
+    });
+  });
+  app.delete("/api/toolkit/productivity/exams/:id", (req, res) => {
+    const userId = getAuthenticatedUserId5(req);
+    const { id } = req.params;
+    const db = loadDb20();
+    const exam = db.exams.find((e) => e.id === id);
+    if (!exam) {
+      return res.status(404).json({ success: false, message: "Exam not found." });
+    }
+    if (exam.userId !== userId) {
+      return res.status(403).json({ success: false, message: "Access denied: Cannot delete another student's exam." });
+    }
+    db.exams = db.exams.filter((e) => e.id !== id);
+    saveDb20(db);
+    return res.json({
+      success: true,
+      message: "Exam removed successfully."
+    });
+  });
+  console.log("[StudentToolkitBackend] Registered Student Toolkit endpoints on /api/toolkit/*");
+}
+
 // server.ts
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path26.dirname(__filename);
+var __dirname = path27.dirname(__filename);
 var DEFAULT_MODEL = "gemini-4-hydrogen";
 var MAX_UPLOAD_BYTES9 = 10 * 1024 * 1024;
 function getGeminiClient2() {
@@ -25868,7 +26518,7 @@ async function startServer() {
   const httpServer = createHttpServer(app);
   app.use(cors());
   app.use(express.json({ limit: "16mb" }));
-  const uploadsDir = path26.join(process.cwd(), "uploads");
+  const uploadsDir = path27.join(process.cwd(), "uploads");
   if (!fs15.existsSync(uploadsDir)) {
     fs15.mkdirSync(uploadsDir, { recursive: true });
   }
@@ -25889,6 +26539,7 @@ async function startServer() {
   registerLockerBackend(app);
   registerRewardsBackend(app);
   registerPlannerBackend(app);
+  registerStudentToolkitBackend(app);
   const notificationsWss = registerNotificationsBackend(app);
   registerAccountProfileSettingsBackend(app);
   registerSuperAdminBackend(app);
@@ -26440,11 +27091,11 @@ Use valid YYYY-MM-DD dates anchored to Today's Date (${payload.todayISO}), HH:MM
     });
     app.use(vite.middlewares);
   } else {
-    app.use("/src/assets/images", express.static(path26.resolve(__dirname, "src/assets/images")));
-    const distPath = path26.resolve(__dirname, "dist");
+    app.use("/src/assets/images", express.static(path27.resolve(__dirname, "src/assets/images")));
+    const distPath = path27.resolve(__dirname, "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
-      res.sendFile(path26.join(distPath, "index.html"));
+      res.sendFile(path27.join(distPath, "index.html"));
     });
   }
   const port = Number(process.env.PORT) || 3e3;

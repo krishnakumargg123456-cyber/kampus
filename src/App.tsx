@@ -58,6 +58,7 @@ const MarketPage = lazy(() => import('./pages/modules/MarketPage').then((m) => (
 const DigitalLockerPage = lazy(() => import('./pages/modules/DigitalLockerPage').then((m) => ({ default: m.DigitalLockerPage })));
 const RewardsPage = lazy(() => import('./pages/modules/RewardsPage').then((m) => ({ default: m.RewardsPage })));
 const PlannerPage = lazy(() => import('./pages/modules/PlannerPage').then((m) => ({ default: m.PlannerPage })));
+const StudentToolkitPage = lazy(() => import('./pages/modules/StudentToolkitPage').then((m) => ({ default: m.StudentToolkitPage })));
 const NotificationsPage = lazy(() => import('./pages/modules/NotificationsPage').then((m) => ({ default: m.NotificationsPage })));
 const ProfilePage = lazy(() => import('./pages/modules/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const SettingsPage = lazy(() => import('./pages/modules/SettingsPage').then((m) => ({ default: m.SettingsPage })));
@@ -458,8 +459,17 @@ const AppLayout: React.FC = () => {
                   }
                 />
 
-                {/* STUDENT TOOLS (Modules 16, 17, 18) */}
-                <Route path="/tools" element={<Navigate to="/tools/planner" replace />} />
+                {/* STUDENT TOOLS (Modules 16, 17, 18 + STUDENT TOOLKIT) */}
+                <Route path="/tools" element={<Navigate to="/tools/toolkit" replace />} />
+                <Route
+                  path="/tools/toolkit"
+                  element={
+                    <ProtectedRoute>
+                      <StudentToolkitPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route path="/toolkit" element={<Navigate to="/tools/toolkit" replace />} />
                 <Route
                   path="/tools/digital-locker"
                   element={
